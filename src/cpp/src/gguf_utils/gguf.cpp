@@ -388,6 +388,13 @@ std::map<std::string, GGUFMetaData> config_from_meta(const std::unordered_map<st
     config["rope_freq_base"] = metadata.count(arch + ".rope.freq_base") ?
             metadata_to_float(metadata, arch + ".rope.freq_base") : 10000.0f;
     config["file_type"] = metadata_to_int(metadata, "general.file_type");
+    // Optional from phi3 metadata
+    if (metadata.count(arch + ".feed_forward_length")) {
+        config["intermediate_size"] = metadata_to_int(metadata, arch + ".feed_forward_length");
+    }
+    if (metadata.count(arch + ".rope.dimension_count")) {
+        config["rope_dim"] = metadata_to_int(metadata, arch + ".rope.dimension_count");
+    }
     return config;
 }
 
@@ -421,21 +428,29 @@ std::unordered_map<std::string, ov::Tensor> consts_from_weights(
         consts[format("model.layers[%d].post_attention_layernorm.weight", i)] = weights.at(format("blk.%d.ffn_norm.weight", i));
         
         // Attention weights
-        consts[format("model.layers[%d].self_attn.q_proj.weight", i)] = weights.at(format("blk.%d.attn_q.weight", i));
+        if (weights.at(format("blk.%d.attn_q.weight", i))) {
+            consts[format("model.layers[%d].self_attn.q_proj.weight", i)] = weights.at(format("blk.%d.attn_q.weight", i));
+        }
         if (weights.count(format("blk.%d.attn_q.bias", i))) {
             consts[format("model.layers[%d].self_attn.q_proj.bias", i)] = weights.at(format("blk.%d.attn_q.bias", i));
         }
-        consts[format("model.layers[%d].self_attn.k_proj.weight", i)] = weights.at(format("blk.%d.attn_k.weight", i));
+        if (weights.at(format("blk.%d.attn_k.weight", i))) {
+            consts[format("model.layers[%d].self_attn.k_proj.weight", i)] = weights.at(format("blk.%d.attn_k.weight", i));
+        }
         if (weights.count(format("blk.%d.attn_k.bias", i))) {
             consts[format("model.layers[%d].self_attn.k_proj.bias", i)] = weights.at(format("blk.%d.attn_k.bias", i));
         }
-        consts[format("model.layers[%d].self_attn.v_proj.weight", i)] = weights.at(format("blk.%d.attn_v.weight", i));
+        if (weights.at(format("blk.%d.attn_v.weight", i))) {
+            consts[format("model.layers[%d].self_attn.v_proj.weight", i)] = weights.at(format("blk.%d.attn_v.weight", i));
+        }
         if (weights.count(format("blk.%d.attn_v.bias", i))) {
             consts[format("model.layers[%d].self_attn.v_proj.bias", i)] = weights.at(format("blk.%d.attn_v.bias", i));
         }
-        consts[format("model.layers[%d].self_attn.o_proj.weight", i)] = weights.at(format("blk.%d.attn_output.weight", i));
-        if (weights.count(format("blk.%d.attn_output.bias", i))) {
-            consts[format("model.layers[%d].self_attn.o_proj.bias", i)] = weights.at(format("blk.%d.attn_output.bias", i));
+        if (weights.at(format("blk.%d.attn_qkv.weight", i))) {
+            consts[format("model.layers[%d].self_attn.qkv_proj.weight", i)] = weights.at(format("blk.%d.attn_qkv.weight", i));
+        }
+        if (weights.count(format("blk.%d.attn_qkv.bias", i))) {
+            consts[format("model.layers[%d].self_attn.qkv_proj.bias", i)] = weights.at(format("blk.%d.attn_qkv.bias", i));
         }
 
         //Qwen3
@@ -446,8 +461,17 @@ std::unordered_map<std::string, ov::Tensor> consts_from_weights(
             consts[format("model.layers[%d].self_attn.q_norm.weight", i)] = weights.at(format("blk.%d.attn_q_norm.weight", i));
         }
 
+        // Output projection
+        consts[format("model.layers[%d].self_attn.o_proj.weight", i)] = weights.at(format("blk.%d.attn_output.weight", i));
+        if (weights.count(format("blk.%d.attn_output.bias", i))) {
+            consts[format("model.layers[%d].self_attn.o_proj.bias", i)] = weights.at(format("blk.%d.attn_output.bias", i));
+        }
+
+
         // MLP weights
-        consts[format("model.layers[%d].mlp.gate_proj.weight", i)] = weights.at(format("blk.%d.ffn_gate.weight", i));
+        if (weights.count(format("blk.%d.ffn_gate.weight", i))) {
+            consts[format("model.layers[%d].mlp.gate_proj.weight", i)] = weights.at(format("blk.%d.ffn_gate.weight", i));
+        }
         if (weights.count(format("blk.%d.ffn_gate.bias", i))) {
             consts[format("model.layers[%d].mlp.gate_proj.bias", i)] = weights.at(format("blk.%d.ffn_gate.bias", i));
         }
@@ -463,6 +487,7 @@ std::unordered_map<std::string, ov::Tensor> consts_from_weights(
         // Quantization parameters 
         // If file_type not ALL_F32 = 0 or MOSTLY_F16 = 1, get dequant scales and biases 
         if (std::get<int>(config.at("file_type")) != 0 && std::get<int>(config.at("file_type")) != 1) { 
+            // scales
             if (weights.count(format("blk.%d.attn_q.scales", i))) {
                 consts[format("model.layers[%d].self_attn.q_proj.scales", i)] = weights.at(format("blk.%d.attn_q.scales", i));
             }
@@ -471,6 +496,10 @@ std::unordered_map<std::string, ov::Tensor> consts_from_weights(
             }
             if (weights.count(format("blk.%d.attn_v.scales", i))) {
                 consts[format("model.layers[%d].self_attn.v_proj.scales", i)] = weights.at(format("blk.%d.attn_v.scales", i));
+            }
+            // phi3 qkv
+            if (weights.count(format("blk.%d.attn_qkv.scales", i))) {
+                consts[format("model.layers[%d].self_attn.qkv_proj.scales", i)] = weights.at(format("blk.%d.attn_qkv.scales", i));
             }
             if (weights.count(format("blk.%d.attn_output.scales", i))) {
                 consts[format("model.layers[%d].self_attn.o_proj.scales", i)] = weights.at(format("blk.%d.attn_output.scales", i));
@@ -484,7 +513,7 @@ std::unordered_map<std::string, ov::Tensor> consts_from_weights(
             if (weights.count(format("blk.%d.ffn_down.scales", i))) {
                 consts[format("model.layers[%d].mlp.down_proj.scales", i)] = weights.at(format("blk.%d.ffn_down.scales", i));
             }
-
+            // biases
             if (weights.count(format("blk.%d.attn_q.biases", i))) {
                 consts[format("model.layers[%d].self_attn.q_proj.biases", i)] = weights.at(format("blk.%d.attn_q.biases", i));
             }  
@@ -493,6 +522,10 @@ std::unordered_map<std::string, ov::Tensor> consts_from_weights(
             }    
             if (weights.count(format("blk.%d.attn_v.biases", i))) {
                 consts[format("model.layers[%d].self_attn.v_proj.biases", i)] = weights.at(format("blk.%d.attn_v.biases", i));
+            }
+            // phi3 qkv
+            if (weights.count(format("blk.%d.attn_qkv.biases", i))) {
+                consts[format("model.layers[%d].self_attn.qkv_proj.biases", i)] = weights.at(format("blk.%d.attn_qkv.biases", i));
             }
             if (weights.count(format("blk.%d.attn_output.biases", i))) {
                 consts[format("model.layers[%d].self_attn.o_proj.biases", i)] = weights.at(format("blk.%d.attn_output.biases", i));
@@ -550,6 +583,10 @@ std::unordered_map<std::string, gguf_tensor_type> get_qtype_map(
         }
         if (qtype.count(format("blk.%d.attn_output.qtype", i))) {
             qtype_map[format("model.layers[%d].self_attn.o_proj.qtype", i)] = qtype.at(format("blk.%d.attn_output.qtype", i));
+        }
+        // phi3 qkv
+        if (qtype.count(format("blk.%d.attn_qkv.qtype", i))) {
+            qtype_map[format("model.layers[%d].self_attn.qkv_proj.qtype", i)] = qtype.at(format("blk.%d.attn_qkv.qtype", i));
         }
 
         // MLP weights

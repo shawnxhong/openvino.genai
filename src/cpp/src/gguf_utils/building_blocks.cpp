@@ -336,6 +336,23 @@ std::shared_ptr<v1::Transpose> split_heads(const Output<Node>& x,
     } 
 };
 
+// helper function for fused projections
+// Split last dimension into 3 equal parts: [B,S,3H] -> Q,K,V each [B,S,H]
+static std::tuple<ov::Output<ov::Node>, ov::Output<ov::Node>, ov::Output<ov::Node>>
+split_qkv_fused(const ov::Output<ov::Node>& qkv) {
+    auto axis = std::make_shared<ov::op::v0::Constant>(ov::element::i64, ov::Shape{}, -1);
+    auto split = std::make_shared<ov::op::v1::Split>(qkv, axis, 3);
+    return {split->output(0), split->output(1), split->output(2)};
+}
+
+// Split last dimension into 2 equal parts: [B,S,2I] -> gate, up each [B,S,I]
+static std::pair<ov::Output<ov::Node>, ov::Output<ov::Node>>
+split_gate_up_fused(const ov::Output<ov::Node>& gate_up) {
+    auto axis = std::make_shared<ov::op::v0::Constant>(ov::element::i64, ov::Shape{}, -1);
+    auto split = std::make_shared<ov::op::v1::Split>(gate_up, axis, 2);
+    return {split->output(0), split->output(1)};
+}
+
 std::tuple<Output<Node>, ov::SinkVector, std::pair<Output<Node>, Output<Node>>, Output<Node>>
 multi_head_attention(
     const Output<Node>& query,
@@ -871,7 +888,7 @@ std::tuple<ov::Output<ov::Node>,
         const ov::Output<ov::Node>& hidden_dim,
         const std::pair<ov::Output<ov::Node>, ov::Output<ov::Node>>& cos_sin_cached,
         const std::shared_ptr<ov::Node>& output_shape) {
-
+    const std::string model_arch = std::get<std::string>(configs.at("architecture"));
     std::string name_suffix = ".layer" + std::to_string(layer_idx);
     std::string name_prefix = "model.layers.self_attn";
     std::string layer_prefix = format("model.layers[%d]", layer_idx);
@@ -888,27 +905,44 @@ std::tuple<ov::Output<ov::Node>,
     if (std::get<std::string>(configs.at("architecture")).find("llama") != std::string::npos) {
         reorder = true;
     }
-    auto q = make_fc(
-        layer_prefix + ".self_attn.q_proj",
-        input_layernorm,
-        consts,
-        qtypes.at(layer_prefix + ".self_attn.q_proj.qtype"),
-        reorder,
-        std::get<int>(configs.at("head_size")));
-    
-    auto k = make_fc(
-        layer_prefix + ".self_attn.k_proj",
-        input_layernorm,
-        consts,
-        qtypes.at(layer_prefix + ".self_attn.k_proj.qtype"),
-        reorder,
-        std::get<int>(configs.at("head_size")));
 
-    auto v = make_fc(
-        layer_prefix + ".self_attn.v_proj",
+    // Phi-3 fused QKV: if qkv_proj.weight exists, do one FC -> Split into Q/K/V.
+    // Otherwise, fallback to the existing separate Q/K/V projections.
+    ov::Output<ov::Node> q, k, v;
+    const bool has_qkv_fused = consts.count(layer_prefix + ".self_attn.qkv_proj.weight") > 0;
+    if (has_qkv_fused) {
+        auto qkv = make_fc(
+        layer_prefix + ".self_attn.qkv_proj",
         input_layernorm,
         consts,
-        qtypes.at(layer_prefix + ".self_attn.v_proj.qtype"));
+        qtypes.at(layer_prefix + ".self_attn.qkv_proj.qtype"),
+        /*reorder=*/false,
+        /*head_size=*/-1);
+        std::tie(q, k, v) = split_qkv_fused(qkv);
+    }
+    else {
+        q = make_fc(
+            layer_prefix + ".self_attn.q_proj",
+            input_layernorm,
+            consts,
+            qtypes.at(layer_prefix + ".self_attn.q_proj.qtype"),
+            reorder,
+            std::get<int>(configs.at("head_size")));
+    
+        k = make_fc(
+            layer_prefix + ".self_attn.k_proj",
+            input_layernorm,
+            consts,
+            qtypes.at(layer_prefix + ".self_attn.k_proj.qtype"),
+            reorder,
+            std::get<int>(configs.at("head_size")));
+
+        v = make_fc(
+            layer_prefix + ".self_attn.v_proj",
+            input_layernorm,
+            consts,
+            qtypes.at(layer_prefix + ".self_attn.v_proj.qtype"));
+    }
 
     // Handle output shape
     std::shared_ptr<ov::Node> final_output_shape = output_shape;
@@ -963,25 +997,51 @@ std::tuple<ov::Output<ov::Node>,
         std::get<float>(configs.at("rms_norm_eps")));
 
     // MLP block
-    auto gate_proj = make_fc(
-        layer_prefix + ".mlp.gate_proj",
-        post_attn_norm,
-        consts,
-        qtypes.at(layer_prefix + ".mlp.gate_proj.qtype"));
-    auto silu = std::make_shared<ov::op::v4::Swish>(gate_proj);
-    auto up_proj = make_fc(
-        layer_prefix + ".mlp.up_proj",
-        post_attn_norm,
-        consts,
-        qtypes.at(layer_prefix + ".mlp.up_proj.qtype"));
-    auto mul = std::make_shared<ov::op::v1::Multiply>(
-        silu, up_proj, ov::op::AutoBroadcastType::NUMPY);
-    mul->set_friendly_name(name_prefix + ".mlp.mul" + name_suffix);
-    auto down_proj = make_fc(
-        layer_prefix + ".mlp.down_proj",
-        mul,
-        consts,
-        qtypes.at(layer_prefix + ".mlp.down_proj.qtype"));
+    // Phi-3 fused gate+up: if gate_up_proj.weight exists, do one FC -> Split into gate/up -> SwiGLU.
+    // Otherwise, fallback to the existing separate gate/up projections.
+    ov::Output<ov::Node> down_proj;
+    
+    if (!model_arch.compare("phi3")) {
+        auto gate_up = make_fc(
+            layer_prefix + ".mlp.gate_proj",
+            post_attn_norm,
+            consts,
+            qtypes.at(layer_prefix + ".mlp.gate_proj.qtype"));
+
+        auto [gate, up] = split_gate_up_fused(gate_up);
+        auto silu = std::make_shared<ov::op::v4::Swish>(gate);  // SiLU
+        auto mul = std::make_shared<ov::op::v1::Multiply>(
+            silu, up, ov::op::AutoBroadcastType::NUMPY);
+        mul->set_friendly_name(name_prefix + ".mlp.mul" + name_suffix);
+
+        down_proj = make_fc(
+            layer_prefix + ".mlp.down_proj",
+            mul,
+            consts,
+            qtypes.at(layer_prefix + ".mlp.down_proj.qtype"));
+    } 
+    else {
+        auto gate_proj = make_fc(
+            layer_prefix + ".mlp.gate_proj",
+            post_attn_norm,
+            consts,
+            qtypes.at(layer_prefix + ".mlp.gate_proj.qtype"));
+        auto silu = std::make_shared<ov::op::v4::Swish>(gate_proj);
+        auto up_proj = make_fc(
+            layer_prefix + ".mlp.up_proj",
+            post_attn_norm,
+            consts,
+            qtypes.at(layer_prefix + ".mlp.up_proj.qtype"));
+        auto mul = std::make_shared<ov::op::v1::Multiply>(
+            silu, up_proj, ov::op::AutoBroadcastType::NUMPY);
+        mul->set_friendly_name(name_prefix + ".mlp.mul" + name_suffix);
+
+        down_proj = make_fc(
+            layer_prefix + ".mlp.down_proj",
+            mul,
+            consts,
+            qtypes.at(layer_prefix + ".mlp.down_proj.qtype"));
+    }
 
     // Final residual connection
     auto output = std::make_shared<ov::op::v1::Add>(

@@ -31,6 +31,12 @@ GGUF_MODEL_LIST = (
         "gguf_filename": "qwen2.5-0.5b-instruct-q4_0.gguf",
         "dynamic_quantization_group_size": None,
     },
+    {
+        "hf_model_id": "microsoft/Phi-3-mini-4k-instruct-gguf",
+        "gguf_model_id": "microsoft/Phi-3-mini-4k-instruct-gguf",
+        "gguf_filename": "Phi-3-mini-4k-instruct-q4.gguf",
+        "dynamic_quantization_group_size": None,
+    },
     pytest.param(
         {
             "hf_model_id": "HuggingFaceTB/SmolLM2-135M",
