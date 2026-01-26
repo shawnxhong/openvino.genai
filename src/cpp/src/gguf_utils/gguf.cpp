@@ -428,25 +428,25 @@ std::unordered_map<std::string, ov::Tensor> consts_from_weights(
         consts[format("model.layers[%d].post_attention_layernorm.weight", i)] = weights.at(format("blk.%d.ffn_norm.weight", i));
         
         // Attention weights
-        if (weights.at(format("blk.%d.attn_q.weight", i))) {
+        if (weights.count(format("blk.%d.attn_q.weight", i))) {
             consts[format("model.layers[%d].self_attn.q_proj.weight", i)] = weights.at(format("blk.%d.attn_q.weight", i));
         }
         if (weights.count(format("blk.%d.attn_q.bias", i))) {
             consts[format("model.layers[%d].self_attn.q_proj.bias", i)] = weights.at(format("blk.%d.attn_q.bias", i));
         }
-        if (weights.at(format("blk.%d.attn_k.weight", i))) {
+        if (weights.count(format("blk.%d.attn_k.weight", i))) {
             consts[format("model.layers[%d].self_attn.k_proj.weight", i)] = weights.at(format("blk.%d.attn_k.weight", i));
         }
         if (weights.count(format("blk.%d.attn_k.bias", i))) {
             consts[format("model.layers[%d].self_attn.k_proj.bias", i)] = weights.at(format("blk.%d.attn_k.bias", i));
         }
-        if (weights.at(format("blk.%d.attn_v.weight", i))) {
+        if (weights.count(format("blk.%d.attn_v.weight", i))) {
             consts[format("model.layers[%d].self_attn.v_proj.weight", i)] = weights.at(format("blk.%d.attn_v.weight", i));
         }
         if (weights.count(format("blk.%d.attn_v.bias", i))) {
             consts[format("model.layers[%d].self_attn.v_proj.bias", i)] = weights.at(format("blk.%d.attn_v.bias", i));
         }
-        if (weights.at(format("blk.%d.attn_qkv.weight", i))) {
+        if (weights.count(format("blk.%d.attn_qkv.weight", i))) {
             consts[format("model.layers[%d].self_attn.qkv_proj.weight", i)] = weights.at(format("blk.%d.attn_qkv.weight", i));
         }
         if (weights.count(format("blk.%d.attn_qkv.bias", i))) {

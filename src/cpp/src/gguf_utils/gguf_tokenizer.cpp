@@ -443,6 +443,59 @@ ov::OutputVector parse_bbpe_config(const std::map<std::string, GGUFMetaData>& to
     return create_func("BPETokenizer", inputs, attributes);
 }
 
+ov::OutputVector parse_sentencepiece_config(const std::map<std::string, GGUFMetaData>& tokenizer_config,
+                                            ov::OutputVector inputs,
+                                            const FactoryCreateType& create_func) {
+    // 1) vocab pieces
+    std::vector<std::string> pieces;
+    if (auto val = std::get_if<std::vector<std::string>>(&tokenizer_config.at("tokens"))) {
+        pieces = *val;
+    }
+    auto pieces_const = create_string_constant(pieces);
+    inputs.insert(inputs.end(), pieces_const.begin(), pieces_const.end());
+ 
+    // 2) scores
+    ov::Tensor scores;
+    if (auto val = std::get_if<ov::Tensor>(&tokenizer_config.at("scores"))) {
+        scores = *val;
+    }
+    auto scores_const = std::make_shared<v0::Constant>(scores);
+    inputs.push_back(scores_const->output(0));
+ 
+    // 3) special token info
+    ov::Tensor token_types;
+    if (auto val = std::get_if<ov::Tensor>(&tokenizer_config.at("token_type"))) {
+        token_types = *val;
+    }
+ 
+    std::vector<int32_t> special_token_indices;
+    for (size_t i = 0; i < pieces.size(); ++i) {
+        if (is_special_token(token_types.data<int32_t>()[i])) {
+            special_token_indices.push_back(static_cast<int32_t>(i));
+        }
+    }
+    auto special_ids_const =
+        std::make_shared<v0::Constant>(element::i32, ov::Shape{special_token_indices.size()}, special_token_indices);
+    inputs.push_back(special_ids_const);
+ 
+    // 4) attributes
+    bool add_bos = false, add_eos = false;
+    if (auto v = std::get_if<ov::Tensor>(&tokenizer_config.at("add_bos_token"))) {
+        add_bos = (v->data<uint8_t>()[0] != 0);
+    }
+    if (auto v = std::get_if<ov::Tensor>(&tokenizer_config.at("add_eos_token"))) {
+        add_eos = (v->data<uint8_t>()[0] != 0);
+    }
+ 
+    std::map<std::string, ov::Any> attrs = {
+        {"add_bos", add_bos},
+        {"add_eos", add_eos},
+    };
+ 
+    return create_func("SentencePieceTokenizer", inputs, attrs);
+}
+
+
 std::tuple<std::shared_ptr<ov::Model>, std::shared_ptr<ov::Model>, std::map<std::string, GGUFMetaData>>
 create_tokenizer_from_config(const std::shared_ptr<void>& shared_object_ov_tokenizers,
                              const std::filesystem::path& gguf_model_path) {
@@ -487,26 +540,9 @@ create_tokenizer_from_config(const std::shared_ptr<void>& shared_object_ov_token
     inputs_to_split.push_back(const_special_tokens->output(0));
     outputs = create_func("SpecialTokensSplit", inputs_to_split, {});
 
-    // no normalization steps
-    // Regex Split
-
     std::string pre{};
     if (auto val = std::get_if<std::string>(&tokenizer_config.at("pre"))) {
         pre = *val;
-    }
-
-    auto split_res = get_split_regex(pre);
-
-    for (const auto& split_re : split_res) {
-        std::string split_behaviour = "isolate";
-
-        ov::Tensor ov_split_re(ov::element::u8, {split_re.size()});
-        std::memcpy(ov_split_re.data<uint8_t>(), split_re.data(), split_re.size());
-        auto const_ov_split_re = std::make_shared<v0::Constant>(ov_split_re);
-
-        outputs.push_back(const_ov_split_re->output(0));
-        outputs =
-            create_func("RegexSplit", outputs, {{"behaviour", split_behaviour}, {"invert", false}, {"max_splits", -1}});
     }
 
     std::string model{};
@@ -514,9 +550,33 @@ create_tokenizer_from_config(const std::shared_ptr<void>& shared_object_ov_token
         model = *val;
     }
 
-    ov::OutputVector bbpe_inputs(outputs.begin(), outputs.begin() + 5);
-    outputs = parse_bbpe_config(tokenizer_config, bbpe_inputs, create_func);
+    if (model == "gpt2") {
+        // no normalization steps
+        // Regex Split
+        auto split_res = get_split_regex(pre);
+        for (const auto& split_re : split_res) {
+            std::string split_behaviour = "isolate";
 
+            ov::Tensor ov_split_re(ov::element::u8, {split_re.size()});
+            std::memcpy(ov_split_re.data<uint8_t>(), split_re.data(), split_re.size());
+            auto const_ov_split_re = std::make_shared<v0::Constant>(ov_split_re);
+
+            outputs.push_back(const_ov_split_re->output(0));
+            outputs =
+                create_func("RegexSplit", outputs, {{"behaviour", split_behaviour}, {"invert", false}, {"max_splits", -1}});
+        }
+        ov::OutputVector bbpe_inputs(outputs.begin(), outputs.begin() + 5);
+        outputs = parse_bbpe_config(tokenizer_config, bbpe_inputs, create_func);
+    }
+    else if (model == "llama") {
+        // SentencePiece Tokenizer
+        ov::OutputVector sp_inputs(outputs.begin(), outputs.begin() + 5);
+        outputs = parse_sentencepiece_config(tokenizer_config, sp_inputs, create_func);
+    } else {
+        OPENVINO_THROW("Unsupported tokenizer model: ", model);
+    }
+
+    // -------- Truncation & Left padding -------
     ov::Output<ov::Node> max_length = std::make_shared<v0::Constant>(element::i32, ov::Shape{}, MAX_LENGTH);
     ov::Output<ov::Node> ends_minus_begins = std::make_shared<v1::Subtract>(outputs[1], outputs[0]);
     max_length = std::make_shared<v1::Minimum>(ends_minus_begins, max_length);
@@ -547,11 +607,19 @@ create_tokenizer_from_config(const std::shared_ptr<void>& shared_object_ov_token
     auto detokenizer_input =
         std::make_shared<v0::Parameter>(element::i64, PartialShape{Dimension::dynamic(), Dimension::dynamic()});
 
-    OPENVINO_ASSERT(model == "gpt2");
-    auto vocab = parse_bbpe_vocab(tokens);
-    ov::OutputVector const_vocab = create_string_constant(vocab);
-    OutputVector detokenizer_outputs = {detokenizer_input};
-    detokenizer_outputs.insert(detokenizer_outputs.end(), const_vocab.begin(), const_vocab.end());
+    // OPENVINO_ASSERT(model == "gpt2");
+    ov::OutputVector detokenizer_outputs = {detokenizer_input};
+    if (model == "gpt2") {
+        auto vocab = parse_bbpe_vocab(tokens);
+        ov::OutputVector const_vocab = create_string_constant(vocab);
+        detokenizer_outputs.insert(detokenizer_outputs.end(), const_vocab.begin(), const_vocab.end());
+    } else if (model == "llama") {
+        ov::OutputVector const_vocab = create_string_constant(tokens);
+        detokenizer_outputs.insert(detokenizer_outputs.end(), const_vocab.begin(), const_vocab.end());
+    }
+    else {
+        OPENVINO_THROW("Unsupported tokenizer model: ", model);
+    }
 
     std::vector<int32_t> special_token_ids;
     for (size_t i = 0; i < token_types.get_size(); ++i) {
@@ -572,6 +640,33 @@ create_tokenizer_from_config(const std::shared_ptr<void>& shared_object_ov_token
 
     // Decode
     detokenizer_outputs = create_func("VocabDecoder", detokenizer_outputs, {});
+    if (model == "llama") {
+        const std::string pat = u8"▁";
+        const std::string rep = " ";
+
+        ov::Tensor ov_pat(ov::element::u8, {pat.size()});
+        std::memcpy(ov_pat.data<uint8_t>(), pat.data(), pat.size());
+        auto const_pat = std::make_shared<v0::Constant>(ov_pat);
+
+        ov::Tensor ov_rep(ov::element::u8, {rep.size()});
+        std::memcpy(ov_rep.data<uint8_t>(), rep.data(), rep.size());
+        auto const_rep = std::make_shared<v0::Constant>(ov_rep);
+
+        // RegexNormalization expects begins/ends/chars + pattern + replacement
+        ov::OutputVector rn_inputs;
+        rn_inputs.push_back(detokenizer_outputs[0]);
+        rn_inputs.push_back(detokenizer_outputs[1]);
+        rn_inputs.push_back(detokenizer_outputs[2]);
+        rn_inputs.push_back(const_pat->output(0));
+        rn_inputs.push_back(const_rep->output(0));
+
+        auto rn_outputs = create_func("RegexNormalization", rn_inputs, {{"global_replace", true}});
+
+        detokenizer_outputs[0] = rn_outputs[0];
+        detokenizer_outputs[1] = rn_outputs[1];
+        detokenizer_outputs[2] = rn_outputs[2];
+    }
+    
     ov::OutputVector inputs_for_fused_ragged(detokenizer_outputs.begin(), detokenizer_outputs.end() - 1);
     auto outputs_fused_ragged = create_func("FuzeRagged", inputs_for_fused_ragged, {});
     outputs_fused_ragged.insert(outputs_fused_ragged.end(), detokenizer_outputs.end() - 1, detokenizer_outputs.end());
