@@ -1,4 +1,4 @@
-// Copyright (C) 2023-2025 Intel Corporation
+// Copyright (C) 2023-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 
 #pragma once
@@ -61,7 +61,7 @@ class Sequence {
     static constexpr size_t m_embeddings_hash_max_num_values = 10; // max number of values used for embeddings hash calculation
     static constexpr size_t m_embeddings_hash_calculation_stride = 50; // the stride with which values are taken from embeddings vector
 
-    size_t _make_hash(size_t content_length);
+    size_t _make_hash(size_t content_length, size_t block_size);
 
     static std::vector<int64_t> _reduce_embedding(const std::vector<float>& embedding);
 
@@ -160,6 +160,10 @@ public:
             m_cumulative_log_prob -= m_generated_log_probs.back();
             m_generated_log_probs.pop_back();
             m_generated_ids.pop_back();
+            if (m_type == SequenceGroupType::EMBEDDINGS) {
+                m_generated_ids_embeds.pop_back();
+                m_position_ids_list.pop_back();
+            }
         }
     }
 
@@ -280,7 +284,8 @@ public:
     // Each KV block can be uniquely identified by
     // the tokens within the block and the tokens in the prefix before the block.
     // hash(prefix tokens + block tokens) <--> KV Block
-    size_t get_hash(size_t content_length = 0);
+    size_t get_hash(size_t content_length, size_t block_size);
+    size_t get_hash(size_t block_size);
 
     static std::pair<ov::Coordinate, ov::Coordinate> get_position_ids_elem_coordinates(const ov::Shape& position_ids_elem_shape, size_t idx, bool need_batch_dimention) {
 
@@ -288,7 +293,7 @@ public:
         ov::Coordinate end;
         if (position_ids_elem_shape.size() == 3) {
             begin = ov::Coordinate{0, 0, idx};
-            end = ov::Coordinate{3, 1, idx + 1};
+            end = ov::Coordinate{position_ids_elem_shape[0], 1, idx + 1};
         }
         else if (position_ids_elem_shape.size() == 2) {
             if (need_batch_dimention) {
@@ -315,10 +320,13 @@ class SequenceGroup  : public std::enable_shared_from_this<SequenceGroup> {
     uint64_t m_request_id;
     std::vector<Sequence::Ptr> m_sequences;
     ov::genai::GenerationConfig m_sampling_params;
-    std::size_t m_block_size;
     TokenIds m_prompt_ids;
     std::vector<std::vector<float>> m_input_embeds;
     std::optional<std::vector<int64_t>> m_token_type_ids;
+
+    ov::Tensor m_deepstack_visual_embeds;
+    std::optional<std::vector<bool>> m_visual_pos_masks;
+
     std::vector<float> m_prompt_log_probs;
     GenerationStream::Ptr m_generation_stream;
     size_t m_num_evicted_tokens = 0;
@@ -343,10 +351,9 @@ class SequenceGroup  : public std::enable_shared_from_this<SequenceGroup> {
 
     size_t m_num_streamed_tokens = 0, m_stream_window_size = 0;
 
-    SequenceGroup(uint64_t request_id, const ov::genai::GenerationConfig& sampling_params, std::size_t block_size)
+    SequenceGroup(uint64_t request_id, const ov::genai::GenerationConfig& sampling_params)
         : m_request_id(request_id),
           m_sampling_params(sampling_params),
-          m_block_size(block_size),
           m_sequence_group_type(SequenceGroupType::TOKENS),
           m_generation_stream(GenerationStream::create()) { }
 
@@ -364,18 +371,19 @@ public:
     using CPtr = std::shared_ptr<const SequenceGroup>;
 
     // const_cast is safe as ov::Tensor only views the data and doesn't modify it.
-    SequenceGroup(uint64_t request_id, const TokenIds& input_ids, const ov::genai::GenerationConfig& sampling_params, std::size_t block_size)
-        : SequenceGroup(request_id, ov::Tensor(ov::element::i64, ov::Shape{input_ids.size()}, const_cast<int64_t*>(input_ids.data())), sampling_params, block_size, std::nullopt) {
+    SequenceGroup(uint64_t request_id, const TokenIds& input_ids, const ov::genai::GenerationConfig& sampling_params)
+        : SequenceGroup(request_id, ov::Tensor(ov::element::i64, ov::Shape{input_ids.size()}, const_cast<int64_t*>(input_ids.data())), sampling_params, std::nullopt, std::nullopt) {
     }
 
     SequenceGroup(uint64_t request_id,
                   const ov::Tensor& input_ids,
                   const ov::genai::GenerationConfig& sampling_params,
-                  std::size_t block_size,
                   const std::optional<ov::Tensor>& token_type_ids = std::nullopt,
+                  const std::optional<std::unordered_map<std::string, ov::Tensor>>& lm_extra_inputs = std::nullopt,
                   const std::optional<ov::Tensor>& position_ids = std::nullopt,
-                  const std::optional<int64_t>& rope_delta = std::nullopt)
-        : SequenceGroup(request_id, sampling_params, block_size) {
+                  const std::optional<int64_t>& rope_delta = std::nullopt,
+                  const std::optional<ov::Tensor>& prompt_ids = std::nullopt)
+        : SequenceGroup(request_id, sampling_params) {
         size_t prompt_len;
         size_t hidden_size = 0;
         if (input_ids.get_shape().size() > 1) {
@@ -387,26 +395,38 @@ public:
 
         if (input_ids.get_element_type() == ov::element::i64) {
             m_prompt_ids.resize(prompt_len);
-            OPENVINO_SUPPRESS_DEPRECATED_START
-            std::copy_n(input_ids.data<int64_t>(), prompt_len, m_prompt_ids.begin());
-            OPENVINO_SUPPRESS_DEPRECATED_END
+            std::copy_n(input_ids.data<const int64_t>(), prompt_len, m_prompt_ids.begin());
             m_sequence_group_type = SequenceGroupType::TOKENS;
         } else if (input_ids.get_element_type() == ov::element::f32) {
             hidden_size = input_ids.get_shape()[2];
             m_input_embeds.resize(prompt_len);
             for (size_t i = 0; i < prompt_len; i++) {
                 m_input_embeds[i].resize(hidden_size);
-                OPENVINO_SUPPRESS_DEPRECATED_START
-                std::copy_n(input_ids.data<float>() + i * hidden_size, hidden_size, m_input_embeds[i].begin());
-                OPENVINO_SUPPRESS_DEPRECATED_END
+                std::copy_n(input_ids.data<const float>() + i * hidden_size, hidden_size, m_input_embeds[i].begin());
             }
             if (token_type_ids.has_value()) {
                 const ov::Tensor& tokens = token_type_ids.value();
                 m_token_type_ids = std::vector<int64_t>(tokens.get_size());
-                OPENVINO_SUPPRESS_DEPRECATED_START
-                std::copy_n(tokens.data<int64_t>(), tokens.get_size(), m_token_type_ids->begin());
-                OPENVINO_SUPPRESS_DEPRECATED_END
+                std::copy_n(tokens.data<const int64_t>(), tokens.get_size(), m_token_type_ids->begin());
             }
+            if (prompt_ids.has_value()) {
+                const ov::Tensor& tokens = prompt_ids.value();
+                OPENVINO_ASSERT(tokens.get_element_type() == ov::element::i64);
+                m_prompt_ids.resize(tokens.get_size());
+                std::copy_n(tokens.data<const int64_t>(), tokens.get_size(), m_prompt_ids.begin());
+            }
+
+            if (lm_extra_inputs.has_value()) {
+                for (const auto& [input_name, tensor] : lm_extra_inputs.value()) {
+                    if (input_name == "deepstack_visual_embeds") {
+                        m_deepstack_visual_embeds = ov::Tensor(tensor.get_element_type(), tensor.get_shape());
+                        tensor.copy_to(m_deepstack_visual_embeds);
+                    } else if (input_name == "visual_pos_masks") {
+                        m_visual_pos_masks = std::vector<bool>(tensor.data<const bool>(), tensor.data<const bool>() + tensor.get_size());
+                    }
+                }
+            }
+            
             m_sequence_group_type = SequenceGroupType::EMBEDDINGS;
         }
         else {
@@ -707,6 +727,16 @@ public:
         return m_token_type_ids;
     }
 
+    const ov::Tensor& get_deepstack_visual_embeds() const {
+        OPENVINO_ASSERT(m_sequence_group_type == ov::genai::SequenceGroupType::EMBEDDINGS);
+        return m_deepstack_visual_embeds;
+    }
+
+    const std::optional<std::vector<bool>>& get_visual_pos_masks() const {
+        OPENVINO_ASSERT(m_sequence_group_type == ov::genai::SequenceGroupType::EMBEDDINGS);
+        return m_visual_pos_masks;
+    }
+
     size_t get_hidden_size() const {
         OPENVINO_ASSERT(m_sequence_group_type == SequenceGroupType::EMBEDDINGS);
         OPENVINO_ASSERT(m_input_embeds.size() > 0, "Embeddings should be set to get hidden size.");
@@ -727,22 +757,6 @@ public:
     size_t get_num_cached_tokens() const {
         OPENVINO_ASSERT(get_num_processed_tokens() >= get_num_evicted_tokens());
         return (get_num_processed_tokens() - get_num_evicted_tokens());
-    }
-
-    /**
-     * @return The number of logical KV cache blocks required to host all the tokens in this sequence group, taking into account previous token evictions.
-     */
-    size_t get_num_logical_blocks() const {
-        return (get_context_len() - get_num_evicted_tokens() + m_block_size - 1) / m_block_size;
-    }
-
-    // requires number of physical blocks for next generation
-    size_t get_num_blocks() const {
-        return get_num_logical_blocks();
-    }
-
-    size_t get_block_size() const {
-        return m_block_size;
     }
 
     Sequence::Ptr fork_sequence(Sequence::CPtr sequence) {

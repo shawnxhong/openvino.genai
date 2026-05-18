@@ -1,3 +1,6 @@
+// Copyright (C) 2025-2026 Intel Corporation
+// SPDX-License-Identifier: Apache-2.0
+
 #include "openvino/genai/parsers.hpp"
 #include <regex>
 #include <string>
@@ -7,6 +10,9 @@
 #include <stdexcept>
 
 namespace ov::genai {
+
+IncrementalParser::IncrementalParser() = default;
+IncrementalParser::~IncrementalParser() = default;
 
 class ReasoningIncrementalParser::ReasoningParserImpl {
 private:
@@ -92,7 +98,7 @@ private:
             // Since txt_chunk contains some cached parts from the previous calls that were not yet processed yet
             // and we kept them in cache until we decide what to do with them. Here we definitely know that that cached parts
             // belonged to reasoning_content so we can discard them.
-            delta_text = content;
+            delta_text = std::move(content);
         } else {
             delta_text = txt_chunk;
         }

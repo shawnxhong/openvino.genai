@@ -1,4 +1,4 @@
-// Copyright (C) 2023-2025 Intel Corporation
+// Copyright (C) 2023-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 
 #pragma once
@@ -22,6 +22,7 @@ namespace genai {
 class OPENVINO_GENAI_EXPORTS AdapterController;
 struct AdapterControllerImpl;
 class AdapterImpl;
+struct AdapterConfig;
 
 // Immutable LoRA Adapter that carries the adaptation matrices and serves as unique adapter identifier
 class OPENVINO_GENAI_EXPORTS Adapter {
@@ -33,6 +34,7 @@ class OPENVINO_GENAI_EXPORTS Adapter {
 
     friend Adapter flux_adapter_normalization(const Adapter& adapter);
     friend Adapter diffusers_adapter_normalization(const Adapter& adapter);
+    friend std::string detect_lora_prefix(const AdapterConfig& adapters);
 
     Adapter(const std::shared_ptr<AdapterImpl>& pimpl);
 public:

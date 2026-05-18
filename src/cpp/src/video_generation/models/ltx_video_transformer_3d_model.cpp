@@ -9,6 +9,7 @@
 #include "json_utils.hpp"
 #include "utils.hpp"
 #include "lora/helper.hpp"
+#include "lora/names_mapping.hpp"
 
 using namespace ov::genai;
 
@@ -26,7 +27,7 @@ std::pair<int64_t, int64_t> get_compression_ratio(const std::filesystem::path& c
     utils::read_json_param(data, "patch_size", patch_size);
     utils::read_json_param(data, "patch_size_t", patch_size_t);
 
-    const auto compression_factor = std::pow(2, std::reduce(spatio_temporal_scaling.begin(), spatio_temporal_scaling.end(), 0));
+    const auto compression_factor = std::pow(2, std::accumulate(spatio_temporal_scaling.begin(), spatio_temporal_scaling.end(), 0));
     const int64_t spatial_compression_ratio = patch_size * compression_factor;
     const int64_t temporal_compression_ratio = patch_size_t * compression_factor;
 
@@ -70,10 +71,16 @@ LTXVideoTransformer3DModel& LTXVideoTransformer3DModel::compile(const std::strin
     OPENVINO_ASSERT(m_model, "Model has been already compiled. Cannot re-compile already compiled model");
     std::optional<AdapterConfig> adapters;
     auto filtered_properties = extract_adapters_from_properties(properties, &adapters);
-    OPENVINO_ASSERT(!adapters, "Adapters are not currently supported for Video Generation Pipeline.");
+    if (adapters) {
+        m_lora_prefix = adapters->get_tensor_name_prefix().value_or(detect_lora_prefix(*adapters));
+        adapters->set_tensor_name_prefix(m_lora_prefix);
+        m_adapter_controller = AdapterController(m_model, *adapters, device);
+    }
     ov::CompiledModel compiled_model = utils::singleton_core().compile_model(m_model, device, *filtered_properties);
     ov::genai::utils::print_compiled_model_properties(compiled_model, "LTX Video Transformer 3D model");
     m_request = compiled_model.create_infer_request();
+    const auto& input_shape = compiled_model.input(0).get_partial_shape();
+    m_expected_batch_size = input_shape.is_static() ? input_shape[0].get_length() : 0;
     // release the original model
     m_model.reset();
 
@@ -85,6 +92,19 @@ void LTXVideoTransformer3DModel::set_hidden_states(const std::string& tensor_nam
     m_request.set_tensor(tensor_name, encoder_hidden_states);
 }
 
+void LTXVideoTransformer3DModel::set_adapters(const std::optional<AdapterConfig>& adapters) {
+    OPENVINO_ASSERT(m_request, "Transformer model must be compiled first");
+    if (adapters) {
+        if (*adapters && !adapters->get_tensor_name_prefix().has_value()) {
+            AdapterConfig adapters_with_prefix = *adapters;
+            adapters_with_prefix.set_tensor_name_prefix(m_lora_prefix);
+            m_adapter_controller.apply(m_request, adapters_with_prefix);
+        } else {
+            m_adapter_controller.apply(m_request, *adapters);
+        }
+    }
+}
+
 ov::Tensor LTXVideoTransformer3DModel::infer(const ov::Tensor& latent_model_input, const ov::Tensor& timestep) {
     OPENVINO_ASSERT(m_request, "Transformer model must be compiled first. Cannot infer non-compiled model");
 
@@ -93,6 +113,21 @@ ov::Tensor LTXVideoTransformer3DModel::infer(const ov::Tensor& latent_model_inpu
     m_request.infer();
 
     return m_request.get_output_tensor();
+}
+
+size_t LTXVideoTransformer3DModel::get_expected_batch_size() const {
+    return m_expected_batch_size;
+}
+
+size_t LTXVideoTransformer3DModel::get_request_input_batch() {
+    if (!m_request) {
+        return 0;
+    }
+    const ov::Shape shape = m_request.get_input_tensor(0).get_shape();
+    if (shape.empty()) {
+        return 0;
+    }
+    return shape[0];
 }
 
 LTXVideoTransformer3DModel& LTXVideoTransformer3DModel::reshape(int64_t batch_size,

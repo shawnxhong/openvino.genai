@@ -1,4 +1,4 @@
-// Copyright (C) 2023-2025 Intel Corporation
+// Copyright (C) 2023-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 
 #include <fstream>
@@ -8,14 +8,23 @@
 #include "openvino/core/visibility.hpp"
 #include "openvino/genai/llm_pipeline.hpp"
 #include "openvino/genai/perf_metrics.hpp"
+#include "openvino/genai/text_streamer.hpp"
 
 #include "llm/pipeline_stateful.hpp"
 #include "llm/pipeline_continuous_batching_adapter.hpp"
-#include "speculative_decoding/speculative_decoding_impl.hpp"
-#include "speculative_decoding/speculative_decoding_stateful.hpp"
+#include "speculative_decoding/eagle3_model_transforms.hpp"
+#include "speculative_decoding/stateful/eagle3_strategy.hpp"
+#include "speculative_decoding/stateful/fast_draft_strategy.hpp"
 #include "utils.hpp"
+#include "logger.hpp"
 
 namespace {
+
+void log_paged_attention_fallback(const ov::Exception& exception) {
+    GENAI_WARN("Paged Attention backend initialization failed. Falling back to SDPA backend. "
+                "Set ATTENTION_BACKEND=\"SDPA\" to skip Paged Attention initialization.");
+    GENAI_DEBUG("Paged Attention backend initialization error: %s", exception.what());
+}
 
 // This is a decorator function that wraps a generation callable to apply parsers and reset them before generation if needed.
 ov::genai::DecodedResults run_generate_with_parsers(const ov::genai::OptionalGenerationConfig& generation_config,
@@ -74,32 +83,18 @@ namespace ov {
 namespace genai {
 
 std::pair<std::string, Any> streamer(StreamerVariant func) {
-    if (auto streamer_obj = std::get_if<std::shared_ptr<StreamerBase>>(&func)) {
+    if (std::holds_alternative<std::monostate>(func)) {
+        return {utils::STREAMER_ARG_NAME, Any()};
+    } else if (auto streamer_obj = std::get_if<std::shared_ptr<StreamerBase>>(&func)) {
         return {utils::STREAMER_ARG_NAME, Any::make<std::shared_ptr<StreamerBase>>(*streamer_obj)};
-    } else if (auto streamer_obj = std::get_if<std::function<StreamingStatus(std::string)>>(&func)) {
-        return {utils::STREAMER_ARG_NAME, Any::make<std::function<StreamingStatus(std::string)>>(*streamer_obj)};
     } else {
-        auto callback = std::get<std::function<bool(std::string)>>(func);
-        return {utils::STREAMER_ARG_NAME, Any::make<std::function<bool(std::string)>>(callback)};
+        auto status_streamer_obj = std::get<std::function<StreamingStatus(std::string)>>(func);
+        return {utils::STREAMER_ARG_NAME, Any::make<std::function<StreamingStatus(std::string)>>(status_streamer_obj)};
     }
 }
 
 std::pair<std::string, Any> generation_config(const GenerationConfig& config) {
     return {utils::CONFIG_ARG_NAME, Any::make<GenerationConfig>(config)};
-}
-
-inline void apply_eagle_rt_info(std::shared_ptr<ov::Model>& model, ov::AnyMap& properties, const std::filesystem::path& mapping_path) {
-    if (model->has_rt_info("eagle3_mode") && model->get_rt_info<bool>("eagle3_mode")) {
-        properties["eagle3_mode"] = true;
-        if (model->has_rt_info("hidden_layers_list"))
-            properties["hidden_layers_list"] = model->get_rt_info<std::vector<int>>("hidden_layers_list");
-    }
-}
-
-inline void apply_eagle_rt_info(std::shared_ptr<ov::Model>& model,
-                                ov::AnyMap& properties,
-                                const std::string& mapping_path) {
-    apply_eagle_rt_info(model, properties, std::filesystem::path(mapping_path));
 }
 
 std::pair<std::string, Any> draft_model(
@@ -110,7 +105,7 @@ std::pair<std::string, Any> draft_model(
 
     std::filesystem::path openvino_model_name = "openvino_model.xml";
     auto model = utils::singleton_core().read_model(models_path / openvino_model_name, {}, plugin_config);
-    apply_eagle_rt_info(model, plugin_config, models_path);
+    utils::eagle3::apply_eagle3_rt_info(model, plugin_config);
     auto generation_config = utils::from_config_json_if_exists(models_path);
     auto tokenizer = ov::genai::Tokenizer(models_path);
     return { utils::DRAFT_MODEL_ARG_NAME, Any::make<ModelDesc>(model, tokenizer, device, plugin_config, scheduler_config, generation_config) };
@@ -126,7 +121,7 @@ std::pair<std::string, Any> draft_model(
     auto [plugin_config, scheduler_config] = utils::extract_scheduler_config(properties);
 
     auto model = utils::singleton_core().read_model(model_str, weights_tensor);
-    apply_eagle_rt_info(model, plugin_config, model_str);
+    utils::eagle3::apply_eagle3_rt_info(model, plugin_config);
     return { utils::DRAFT_MODEL_ARG_NAME, Any::make<ModelDesc>(model, tokenizer, device, plugin_config, scheduler_config, generation_config) };
 }
 
@@ -137,12 +132,12 @@ static std::unique_ptr<LLMPipelineImplBase> create(
     const ov::genai::Tokenizer& tokenizer,
     const std::string& device,
     const ov::AnyMap& properties) {
-    return create(
-        ov::genai::utils::read_model(models_path, properties),
-        tokenizer,
-        device,
-        properties,
-        utils::from_config_json_if_exists(models_path));
+    return create(ov::genai::utils::read_model(models_path, properties),
+                  tokenizer,
+                  device,
+                  properties,
+                  utils::from_config_json_if_exists(models_path),
+                  models_path);
 }
 
 static std::unique_ptr<LLMPipelineImplBase> create(
@@ -152,26 +147,48 @@ static std::unique_ptr<LLMPipelineImplBase> create(
     return create(models_path, Tokenizer(models_path, plugin_config), device, plugin_config);
 }
 
-static std::unique_ptr<LLMPipelineImplBase> create(
-    const std::shared_ptr<ov::Model>& model,
-    const ov::genai::Tokenizer& tokenizer,
-    const std::string& device,
-    const ov::AnyMap& properties,
-    const ov::genai::GenerationConfig& generation_config) {
-
+static std::unique_ptr<LLMPipelineImplBase> create(const std::shared_ptr<ov::Model>& model,
+                                                   const ov::genai::Tokenizer& tokenizer,
+                                                   const std::string& device,
+                                                   const ov::AnyMap& properties,
+                                                   const ov::genai::GenerationConfig& generation_config,
+                                                   const std::filesystem::path& models_path = {}) {
+    OPENVINO_ASSERT(model, "Model must not be null");
     auto properties_without_draft_model = properties;
     auto draft_model_descr = ov::genai::utils::extract_draft_model_from_config(properties_without_draft_model);
-    if (draft_model_descr.model != nullptr) {
+
+    auto main_model_descr =
+        ov::genai::ModelDesc(model, tokenizer, device, properties_without_draft_model, {}, generation_config);
+    OPENVINO_ASSERT(main_model_descr.model, "Model descriptor must contain a valid model");
+
+    if (draft_model_descr.model) {
         // FIXME: Add support for StatefulSpeculativeLLMPipeline for non-NPU devices for both models.
         OPENVINO_ASSERT(device == "NPU" || draft_model_descr.device == "NPU",
-            "Stateful Speculative Decoding is expected to be launched when NPU is requested as "
-            "execution device for one or both models.");
-        auto main_model_descr = ov::genai::ModelDesc(model, tokenizer, device, properties_without_draft_model, {}, generation_config);
-        return std::make_unique<StatefulSpeculativeLLMPipeline>(main_model_descr, draft_model_descr);
+                        "Stateful FastDraft and Stateful Eagle3 Speculative Decoding require NPU to be "
+                        "the execution device for at least one model.");
+
+        // Check if Eagle3 mode is enabled in draft model properties
+        bool is_eagle3_mode = draft_model_descr.properties.find("eagle3_mode") != draft_model_descr.properties.end() &&
+                              draft_model_descr.properties.at("eagle3_mode").as<bool>();
+
+        if (is_eagle3_mode) {
+            // Eagle3 Speculative Decoding mode
+            auto eagle_rt_info = utils::eagle3::extract_eagle3_info_from_config(draft_model_descr.properties, models_path);
+            if (!eagle_rt_info.hidden_layers_list.empty()) {
+                draft_model_descr.properties["hidden_layers_list"] = eagle_rt_info.hidden_layers_list;
+            }
+            return std::make_unique<StatefulEagle3LLMPipeline>(main_model_descr, draft_model_descr);
+        } else {
+            // Standard Speculative Decoding mode (FastDraft)
+            return std::make_unique<StatefulSpeculativeLLMPipeline>(main_model_descr, draft_model_descr);
+        }
     }
 
-    return std::make_unique<StatefulLLMPipeline>(model, tokenizer, device,
-        properties_without_draft_model, generation_config);
+    return std::make_unique<StatefulLLMPipeline>(main_model_descr.model,
+                                                 main_model_descr.tokenizer,
+                                                 main_model_descr.device,
+                                                 main_model_descr.properties,
+                                                 main_model_descr.generation_config);
 }
 };
 
@@ -196,30 +213,34 @@ ov::genai::LLMPipeline::LLMPipeline(
 
     bool is_npu_requested = ov::genai::utils::is_npu_requested(device, user_properties);
     auto [properties, attention_backend] = utils::extract_attention_backend(user_properties, is_npu_requested);
+    utils::extract_extensions_to_core(properties);
 
+    std::shared_ptr<ov::Model> model = utils::read_model(models_path, properties);
+
+    const auto generation_config = utils::from_config_json_if_exists(models_path);
     if (is_npu_requested) {
-        m_pimpl = StatefulPipeline::create(models_path, tokenizer, device, properties);
+        m_pimpl = StatefulPipeline::create(model, tokenizer, device, properties, generation_config, models_path);
     } else if (utils::explicitly_requires_paged_attention(user_properties)) {
         // If CB is invoked explicitly, create CB adapter as is and re-throw in case if internal issues
         auto [device_properties, scheduler_config] = utils::extract_scheduler_config(properties, utils::get_latency_oriented_scheduler_config());
-        m_pimpl = std::make_unique<ContinuousBatchingAdapter>(models_path, tokenizer, scheduler_config, device, device_properties);
+        m_pimpl = std::make_unique<ContinuousBatchingAdapter>(model, tokenizer, scheduler_config, device, device_properties, generation_config, models_path);
     } else if (attention_backend == PA_BACKEND) {
-        // try to call CB adapter one more time, but with safe guard to silent exception
         try {
             // we need use CB only for x86 and arm64, as for other architectures like risc-v we can create Paged Attention based model
             // but cannot perform its inference later
 #if defined(OPENVINO_ARCH_X86_64) || defined(OPENVINO_ARCH_ARM64)
-            m_pimpl = std::make_unique<ContinuousBatchingAdapter>(models_path, tokenizer, utils::get_latency_oriented_scheduler_config(), device, properties);
+            m_pimpl = std::make_unique<ContinuousBatchingAdapter>(model, tokenizer, utils::get_latency_oriented_scheduler_config(), device, properties, generation_config, models_path);
 #endif
-        } catch (ov::Exception&) {
-            // ignore exceptions from PA
+        } catch (const ov::Exception& exception) {
+            log_paged_attention_fallback(exception);
+            model = utils::read_model(models_path, properties);
         }
     }
 
     if (m_pimpl == nullptr) {
         // FIXME: Switch to StatefulPipeline::create after resolving issues
         //        with GPU and CPU for StatefulSpeculativeLLMPipeline
-        m_pimpl = std::make_unique<StatefulLLMPipeline>(models_path, tokenizer, device, properties);
+        m_pimpl = std::make_unique<StatefulLLMPipeline>(model, tokenizer, device, properties, generation_config);
     }
 
     m_pimpl->save_load_time(start_time);
@@ -234,30 +255,37 @@ ov::genai::LLMPipeline::LLMPipeline(
 
     bool is_npu_requested = ov::genai::utils::is_npu_requested(device, user_properties);
     auto [properties, attention_backend] = utils::extract_attention_backend(user_properties, is_npu_requested);
+    utils::extract_extensions_to_core(properties);
 
+    // Read model and create tokenizer once to avoid double I/O during pipeline construction.
+    std::shared_ptr<ov::Model> model = utils::read_model(models_path, properties);
+    const Tokenizer tokenizer(models_path, properties);
+
+    const auto generation_config = utils::from_config_json_if_exists(models_path);
     if (is_npu_requested) {
-        m_pimpl = StatefulPipeline::create(models_path, device, properties);
+        m_pimpl = StatefulPipeline::create(model, tokenizer, device, properties, generation_config, models_path);
     } else if (utils::explicitly_requires_paged_attention(user_properties)) {
         // If CB is invoked explicitly, create CB adapter as is and re-throw in case if internal issues
         auto [device_properties, scheduler_config] = utils::extract_scheduler_config(properties, utils::get_latency_oriented_scheduler_config());
-        m_pimpl = std::make_unique<ContinuousBatchingAdapter>(models_path, scheduler_config, device, device_properties);
+        m_pimpl = std::make_unique<ContinuousBatchingAdapter>(model, tokenizer, scheduler_config, device, device_properties, generation_config, models_path);
     } else if (attention_backend == PA_BACKEND) {
         // try to call CB adapter one more time, but with safe guard to silent exception
         try {
             // we need use CB only for x86 and arm64, as for other architectures like risc-v we can create Paged Attention based model
             // but cannot perform its inference later
 #if defined(OPENVINO_ARCH_X86_64) || defined(OPENVINO_ARCH_ARM64)
-            m_pimpl = std::make_unique<ContinuousBatchingAdapter>(models_path, utils::get_latency_oriented_scheduler_config(), device, properties);
+            m_pimpl = std::make_unique<ContinuousBatchingAdapter>(model, tokenizer, utils::get_latency_oriented_scheduler_config(), device, properties, generation_config, models_path);
 #endif
-        } catch (ov::Exception&) {
-            // ignore exceptions from PA
+        } catch (const ov::Exception& exception) {
+            log_paged_attention_fallback(exception);
+            model = utils::read_model(models_path, properties);
         }
     }
 
     if (m_pimpl == nullptr) {
         // FIXME: Switch to StatefulPipeline::create after resolving issues
         //        with GPU and CPU for StatefulSpeculativeLLMPipeline
-        m_pimpl = std::make_unique<StatefulLLMPipeline>(models_path, device, properties);
+        m_pimpl = std::make_unique<StatefulLLMPipeline>(model, tokenizer, device, properties, generation_config);
     }
 
     m_pimpl->save_load_time(start_time);
@@ -275,10 +303,13 @@ ov::genai::LLMPipeline::LLMPipeline(
 
     bool is_npu_requested = ov::genai::utils::is_npu_requested(device, user_properties);
     auto [properties, attention_backend] = utils::extract_attention_backend(user_properties, is_npu_requested);
+    utils::extract_extensions_to_core(properties);
+
+    std::shared_ptr<ov::Model> model = utils::singleton_core().read_model(model_str, weights_tensor);
 
     if (is_npu_requested) {
         m_pimpl = StatefulPipeline::create(
-            utils::singleton_core().read_model(model_str, weights_tensor),
+            model,
             tokenizer,
             device,
             properties,
@@ -286,19 +317,18 @@ ov::genai::LLMPipeline::LLMPipeline(
     } else if (utils::explicitly_requires_paged_attention(user_properties)) {
         // If CB is invoked explicitly, create CB adapter as is and re-throw in case if internal issues
         auto [device_properties, scheduler_config] = utils::extract_scheduler_config(properties, utils::get_latency_oriented_scheduler_config());
-        m_pimpl = std::make_unique<ContinuousBatchingAdapter>(model_str, weights_tensor,
-                                                              tokenizer, scheduler_config, device, device_properties, generation_config);
+        m_pimpl = std::make_unique<ContinuousBatchingAdapter>(model, tokenizer, scheduler_config, device, device_properties, generation_config);
     } else if (attention_backend == PA_BACKEND) {
         // try to call CB adapter one more time, but with safe guard to silent exception
         try {
             // we need use CB only for x86 and arm64, as for other architectures like risc-v we can create Paged Attention based model
             // but cannot perform its inference later
 #if defined(OPENVINO_ARCH_X86_64) || defined(OPENVINO_ARCH_ARM64)
-            m_pimpl = std::make_unique<ContinuousBatchingAdapter>(model_str, weights_tensor, tokenizer,
-                                                                  utils::get_latency_oriented_scheduler_config(), device, properties, generation_config);
+            m_pimpl = std::make_unique<ContinuousBatchingAdapter>(model, tokenizer, utils::get_latency_oriented_scheduler_config(), device, properties, generation_config);
 #endif
-        } catch (ov::Exception&) {
-            // ignore exceptions from PA
+        } catch (const ov::Exception& exception) {
+            log_paged_attention_fallback(exception);
+            model = utils::singleton_core().read_model(model_str, weights_tensor);
         }
     }
 
@@ -306,7 +336,7 @@ ov::genai::LLMPipeline::LLMPipeline(
         // FIXME: Switch to StatefulPipeline::create after resolving issues
         //        with GPU and CPU for StatefulSpeculativeLLMPipeline
         m_pimpl = std::make_unique<StatefulLLMPipeline>(
-            utils::singleton_core().read_model(model_str, weights_tensor),
+            model,
             tokenizer,
             device,
             properties,
@@ -381,10 +411,14 @@ ov::genai::Tokenizer ov::genai::LLMPipeline::get_tokenizer() {
 }
 
 void ov::genai::LLMPipeline::start_chat(const std::string& system_message) {
+    GENAI_WARN("start_chat() / finish_chat() API is deprecated and will be removed in the next major release. "
+               "Please, use generate() with ChatHistory argument.");
     m_pimpl->start_chat(system_message);
 }
 
 void ov::genai::LLMPipeline::finish_chat() {
+    GENAI_WARN("start_chat() / finish_chat() API is deprecated and will be removed in the next major release. "
+               "Please, use generate() with ChatHistory argument.");
     m_pimpl->finish_chat();
 }
 

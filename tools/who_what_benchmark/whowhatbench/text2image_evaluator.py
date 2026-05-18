@@ -1,3 +1,6 @@
+# Copyright (C) 2023-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 from typing import Any, Union
 
@@ -29,6 +32,8 @@ default_data = {
 
 @register_evaluator("text-to-image")
 class Text2ImageEvaluator(BaseEvaluator):
+    DEFAULT_NUM_INFERENCE_STEPS = 4
+
     def __init__(
         self,
         base_model: Any = None,
@@ -37,7 +42,7 @@ class Text2ImageEvaluator(BaseEvaluator):
         metrics="similarity",
         similarity_model_id: str = "openai/clip-vit-large-patch14",
         resolution=(512, 512),
-        num_inference_steps=4,
+        num_inference_steps=None,
         crop_prompts=True,
         num_samples=None,
         gen_image_fn=None,
@@ -54,7 +59,7 @@ class Text2ImageEvaluator(BaseEvaluator):
         self.resolution = resolution
         self.crop_prompt = crop_prompts
         self.num_samples = num_samples
-        self.num_inference_steps = num_inference_steps
+        self.num_inference_steps = num_inference_steps or self.DEFAULT_NUM_INFERENCE_STEPS
         self.seed = seed
         self.similarity = None
         self.similarity = ImageSimilarity(similarity_model_id)
@@ -156,7 +161,7 @@ class Text2ImageEvaluator(BaseEvaluator):
         if not os.path.exists(image_dir):
             os.makedirs(image_dir)
 
-        for i, prompt in tqdm(enumerate(prompts), desc="Evaluate pipeline"):
+        for i, prompt in tqdm(enumerate(prompts), total=len(prompts), desc="Evaluate pipeline"):
             set_seed(self.seed)
             rng = rng.manual_seed(self.seed)
             image = generation_fn(

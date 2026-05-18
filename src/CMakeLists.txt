@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
 
@@ -59,10 +59,6 @@ else()
     set(LIBRARY_DESTINATION runtime/lib/${ARCH_DIR})
     set(ARCHIVE_DESTINATION runtime/lib/${ARCH_DIR})
     set(RUNTIME_DESTINATION runtime/bin/${ARCH_DIR})
-endif()
-
-if(NOT DEFINED ENABLE_LTO)
-    set(ENABLE_LTO OFF)
 endif()
 
 #

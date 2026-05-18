@@ -1,4 +1,4 @@
-// Copyright (C) 2023-2025 Intel Corporation
+// Copyright (C) 2023-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 
 #pragma once
@@ -18,9 +18,14 @@ enum class GenerationStatus {
     IGNORED = 2, // Status set when generation run into out-of-memory condition and could not be continued
     CANCEL = 3, // Status set when generation handle is cancelled. The last prompt and all generated tokens will be dropped from history, KV cache will include history but last step.
     STOP = 4, // Status set when generation handle is stopped. History will be kept, KV cache will include the last prompt and generated tokens.
-    DROPPED_BY_HANDLE OPENVINO_ENUM_DEPRECATED("Please, use `STOP` instead of `DROPPED_BY_HANDLE`.") = GenerationStatus::STOP // Status set when generation handle is dropped.
 };
 
+enum class GenerationFinishReason {
+    NONE = 0, // Default value, when generation is not yet finished
+    STOP = 1, // Generation finished due to an external stop request or by reaching EOS/stop-sequence
+    LENGTH = 2, // Generation finished by reaching max_new_tokens limit
+    TOOL_CALL = 3 // Generation stop invoked by tool calling parser
+};
 
 struct EncodedGenerationResult {
     // request ID - obsolete when handle API is approved as handle will connect results with prompts.
@@ -31,6 +36,8 @@ struct EncodedGenerationResult {
     std::vector<std::vector<int64_t>> m_generation_ids;
     // scores
     std::vector<float> m_scores;
+    // per-sequence finish reasons aligned with m_generation_ids / m_scores
+    std::vector<GenerationFinishReason> m_finish_reasons;
 
     // Status of generation
     GenerationStatus m_status = GenerationStatus::RUNNING;
@@ -45,12 +52,6 @@ struct EncodedGenerationResult {
     std::shared_ptr<ExtendedPerfMetrics> extended_perf_metrics;
 };
 
-enum class GenerationFinishReason {
-    NONE = 0, // Default value, when generation is not yet finished
-    STOP = 1, // Generation finished naturally, by reaching end of sequence token
-    LENGTH = 2 // Generation finished by reaching max_new_tokens limit
-};
-
 struct GenerationResult {
     // request ID - obsolete when handle API is approved as handle will connect results with prompts.
     uint64_t m_request_id = 0;
@@ -60,6 +61,8 @@ struct GenerationResult {
     std::vector<std::string> m_generation_ids;
     // scores
     std::vector<float> m_scores;
+    // per-sequence finish reasons aligned with m_generation_ids / m_scores
+    std::vector<GenerationFinishReason> m_finish_reasons;
 
     // Status of generation
     GenerationStatus m_status = GenerationStatus::RUNNING;
@@ -104,17 +107,11 @@ public:
 
     bool can_read();
 
-    OPENVINO_DEPRECATED("Please, use `stop()` instead of `drop()`. Support will be removed in 2026.0.0 release.")
-    bool is_dropped();
-
     bool is_stopped();
 
     bool is_cancelled();
 
-    OPENVINO_DEPRECATED("Please, use `stop()` instead of `drop()`. Support will be removed in 2026.0.0 release.")
-    void drop();
-
-    void stop();
+    void stop(GenerationFinishReason finish_reason = GenerationFinishReason::STOP);
 
     void cancel();
 

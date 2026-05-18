@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
 
@@ -26,6 +26,8 @@ set(TEST_TARGET_NAME "tests_continuous_batching")
 
 add_executable(${TEST_TARGET_NAME} ${tests_src} $<TARGET_OBJECTS:openvino_genai_obj>)
 
+add_subdirectory(custom_op)
+
 target_link_libraries(${TEST_TARGET_NAME} PRIVATE $<TARGET_PROPERTY:openvino::genai,LINK_LIBRARIES> gtest_main gmock_main)
 
 # Add OpenCL support if enabled via OpenVINO configuration (consistent with main library)
@@ -46,5 +48,10 @@ endif()
 
 install(TARGETS ${TEST_TARGET_NAME}
         RUNTIME DESTINATION tests/
+        COMPONENT tests
+        EXCLUDE_FROM_ALL)
+
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/data/"
+        DESTINATION tests/data/
         COMPONENT tests
         EXCLUDE_FROM_ALL)

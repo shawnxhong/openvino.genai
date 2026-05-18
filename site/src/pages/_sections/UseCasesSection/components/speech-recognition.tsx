@@ -1,10 +1,11 @@
 import Button from '@site/src/components/Button';
-import { LanguageTabs, TabItemCpp, TabItemPython } from '@site/src/components/LanguageTabs';
+import { LanguageTabs, TabItemCpp, TabItemJS, TabItemPython } from '@site/src/components/LanguageTabs';
 
 import UseCaseCard from './UseCaseCard';
 
 import CodeExampleCpp from '@site/docs/use-cases/speech-recognition/_sections/_run_model/_code_example_cpp.mdx';
 import CodeExamplePython from '@site/docs/use-cases/speech-recognition/_sections/_run_model/_code_example_python.mdx';
+import CodeExampleJS from '@site/docs/use-cases/speech-recognition/_sections/_run_model/_code_example_js.mdx';
 
 export const SpeechRecognition = () => (
   <UseCaseCard>
@@ -16,8 +17,9 @@ export const SpeechRecognition = () => (
     <UseCaseCard.Features>
       <li>Translate foreign language speech directly to English text</li>
       <li>Transcribe audio in multiple languages with automatic language detection</li>
-      <li>Generate precise timestamps for synchronized subtitles and captions</li>
       <li>Process long-form audio content (&gt;30 seconds) efficiently</li>
+      <li>Generate precise timestamps for synchronized subtitles and captions</li>
+      <li>Generate word-level timestamps for detailed transcription</li>
     </UseCaseCard.Features>
     <UseCaseCard.Code>
       <LanguageTabs>
@@ -27,6 +29,9 @@ export const SpeechRecognition = () => (
         <TabItemCpp>
           <CodeExampleCpp />
         </TabItemCpp>
+        <TabItemJS>
+          <CodeExampleJS />
+        </TabItemJS>
       </LanguageTabs>
     </UseCaseCard.Code>
     <UseCaseCard.Actions>

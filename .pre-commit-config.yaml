@@ -1,4 +1,9 @@
-exclude: '\.pyi$'
+exclude: |
+  (?x)(
+    \.pyi$|
+    ^tools/llm_bench/prompts/|
+    ^tools/who_what_benchmark/whowhatbench/prompts/
+  )
 repos:
   - repo: meta
     hooks:
@@ -17,6 +22,7 @@ repos:
         args: ["--fix=lf"]
       - id: check-ast
       - id: check-yaml
+      - id: check-json
       - id: check-toml
       - id: check-added-large-files
         args: ["--maxkb=1000"]

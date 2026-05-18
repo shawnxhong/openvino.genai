@@ -1,4 +1,4 @@
-// Copyright (C) 2023-2025 Intel Corporation
+// Copyright (C) 2023-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 
 #include <filesystem>
@@ -136,6 +136,7 @@ void init_llm_pipeline(py::module_& m) {
                 auto config_properties = pyutils::properties_to_any_map(config);
                 properties.insert(config_properties.begin(), config_properties.end());
             }
+            py::gil_scoped_release rel;
             return std::make_unique<LLMPipeline>(models_path, tokenizer, device, properties);
         }),
         py::arg("models_path"),
@@ -166,6 +167,7 @@ void init_llm_pipeline(py::module_& m) {
                 auto config_properties = pyutils::properties_to_any_map(config);
                 properties.insert(config_properties.begin(), config_properties.end());
             }
+            py::gil_scoped_release rel;
             return std::make_unique<LLMPipeline>(models_path, device, properties);
         }),
         py::arg("models_path"), "folder with openvino_model.xml and openvino_tokenizer[detokenizer].xml files",
@@ -192,6 +194,7 @@ void init_llm_pipeline(py::module_& m) {
             if (!generation_config.has_value()) {
                 generation_config = ov::genai::GenerationConfig();
             }
+            py::gil_scoped_release rel;
             return std::make_unique<LLMPipeline>(model, weights, tokenizer, device, properties, *generation_config);
         }),
         py::arg("model"), "string with pre-read model",
@@ -242,8 +245,20 @@ void init_llm_pipeline(py::module_& m) {
         )
 
         .def("get_tokenizer", &LLMPipeline::get_tokenizer)
-        .def("start_chat", &LLMPipeline::start_chat, py::arg("system_message") = "")
-        .def("finish_chat", &LLMPipeline::finish_chat)
+        .def("start_chat", [](LLMPipeline& pipe, const std::string& system_message) {
+            PyErr_WarnEx(PyExc_DeprecationWarning,
+                         "start_chat() / finish_chat() API is deprecated and will be removed in the next major release. "
+                         "Please use generate() with ChatHistory argument.",
+                         1);
+            pipe.start_chat(system_message);
+        }, py::arg("system_message") = "")
+        .def("finish_chat", [](LLMPipeline& pipe) {
+            PyErr_WarnEx(PyExc_DeprecationWarning,
+                         "start_chat() / finish_chat() API is deprecated and will be removed in the next major release. "
+                         "Please use generate() with ChatHistory argument.",
+                         1);
+            pipe.finish_chat();
+        })
         .def("get_generation_config", &LLMPipeline::get_generation_config, py::return_value_policy::copy)
         .def("set_generation_config", &LLMPipeline::set_generation_config, py::arg("config"));
 

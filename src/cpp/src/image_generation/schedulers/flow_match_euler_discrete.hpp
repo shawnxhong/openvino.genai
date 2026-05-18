@@ -1,8 +1,9 @@
-// Copyright (C) 2023-2025 Intel Corporation
+// Copyright (C) 2023-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 
 #pragma once
 
+#include <cstdint>
 #include <list>
 #include <string>
 
@@ -59,9 +60,9 @@ private:
     size_t m_num_inference_steps;
 
     void init_step_index();
-    double sigma_to_t(double simga);
+    double sigma_to_t(double sigma);
     size_t _index_for_timestep(float timestep);
-    float calculate_shift(size_t image_seq_len);
+    double calculate_shift(size_t image_seq_len);
 };
 
 } // namespace genai

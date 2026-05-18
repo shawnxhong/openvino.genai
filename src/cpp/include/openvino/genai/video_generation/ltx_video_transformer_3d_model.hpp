@@ -11,6 +11,7 @@
 #include "openvino/runtime/infer_request.hpp"
 #include "openvino/runtime/properties.hpp"
 #include "openvino/runtime/tensor.hpp"
+#include "openvino/genai/lora_adapter.hpp"
 #include "openvino/genai/visibility.hpp"
 
 namespace ov::genai {
@@ -46,17 +47,25 @@ public:
 
     void set_hidden_states(const std::string& tensor_name, const ov::Tensor& encoder_hidden_states);
 
+    void set_adapters(const std::optional<AdapterConfig>& adapters);
+
     ov::Tensor infer(const ov::Tensor& latent, const ov::Tensor& timestep);
 
     LTXVideoTransformer3DModel& reshape(int64_t batch_size, int64_t num_frames, int64_t height, int64_t width, int64_t tokenizer_model_max_length);
+
+    size_t get_expected_batch_size() const;
+    size_t get_request_input_batch();
 
 private:
     class Inference;
     std::shared_ptr<Inference> m_impl;
 
     Config m_config;
+    AdapterController m_adapter_controller;
+    std::string m_lora_prefix;
     ov::InferRequest m_request;
     std::shared_ptr<ov::Model> m_model;
+    size_t m_expected_batch_size = 0;
     int64_t m_spatial_compression_ratio, m_temporal_compression_ratio; // calculated based on vae config, needed for reshape
 
     class InferenceDynamic;

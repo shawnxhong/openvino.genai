@@ -15,6 +15,7 @@ WWB provides default datasets for the supported use cases. However, it is relati
     * Support of custom datasets of the user choice
 * Validation of text-to-image pipelines. Computes similarity score between generated images with Diffusers library, Optimum-Intel, and OpenVINO GenAI via `Text2ImageEvaluator` class.
 * Validation of Visual Language pipelines. Computes similarity score between generated images with Diffusers library, Optimum-Intel, and OpenVINO GenAI via `VisualTextEvaluator` class.
+* Text-to-video evaluator defaults `guidance_scale` to 1; set higher to enable CFG.
 
 ### Installation
 To install WWB and its dependencies, follow these steps:
@@ -33,11 +34,16 @@ PIP_PRE=1 \
 PIP_EXTRA_INDEX_URL=https://storage.openvinotoolkit.org/simple/wheels/nightly \
 pip install .
 ```
+Some models require specific module versions, WWB supports installing certain configurations. For more information, please refer to `extras_require` in setup.py.
+For example:
+```
+pip install .[minicpm-o-2_6]
+```
 
 ## Usage
 ### Compare Text-generation Models (LLMs)
 ```sh
-# Collect ground truth from the baseline Hugging Face Transformer model 
+# Collect ground truth from the baseline Hugging Face Transformer model
 wwb --base-model microsoft/Phi-3-mini-4k-instruct --gt-data gt.csv --model-type text --hf
 
 # Convert model to Optimum-Intel (quantized to 8-bit by default)
@@ -51,12 +57,13 @@ wwb --target-model phi-3-openvino --gt-data gt.csv --model-type text --genai
 ```
 
 > **NOTE**: use --verbose option for debug to see the outputs with the largest difference.
+> **NOTE**: use `--model-type text-chat` option to run evaluation in chat mode
 
 ### Compare Visual Language Models with image inputs (VLMs)
 ```sh
 # Export FP16 model to OpenVINO
 optimum-cli export openvino -m llava-hf/llava-v1.6-mistral-7b-hf  --weight-format int8 llava-int8
-# Collect the references and save the mapping in the .csv file. 
+# Collect the references and save the mapping in the .csv file.
 # Reference images will be stored in the "reference" subfolder under the same path with .csv.
 wwb --base-model llava-hf/llava-v1.6-mistral-7b-hf --gt-data llava_test/gt.csv --model-type visual-text --hf
 # Compute the metric
@@ -64,11 +71,13 @@ wwb --base-model llava-hf/llava-v1.6-mistral-7b-hf --gt-data llava_test/gt.csv -
 wwb --target-model llava-int8 --gt-data llava_test/gt.csv --model-type visual-text --genai
 ```
 
+> **NOTE**: use `--model-type visual-text-chat` option to run evaluation in chat mode
+
 ### Compare Visual Language Models with video inputs (VLMs)
 ```sh
 # Export FP16 model to OpenVINO
 optimum-cli export openvino -m Qwen/Qwen2-VL-7B-Instruct  --weight-format int8 qwen2-vl-7b-Instruct
-# Collect the references and save the mapping in the .csv file. 
+# Collect the references and save the mapping in the .csv file.
 # Reference images will be stored in the "reference" subfolder under the same path with .csv.
 wwb --base-model Qwen/Qwen2-VL-7B-Instruct --gt-data qwen_video_test/gt.csv --model-type visual-video-text --hf
 # Compute the metric
@@ -80,7 +89,7 @@ wwb --target-model qwen2-vl-7b-Instruct --gt-data qwen_video_test/gt.csv --model
 ```sh
 # Export model with 8-bit quantized weights to OpenVINO
 optimum-cli export openvino -m SimianLuo/LCM_Dreamshaper_v7 --weight-format int8 sd-lcm-int8
-# Collect the references and save the mapping in the .csv file. 
+# Collect the references and save the mapping in the .csv file.
 # Reference images will be stored in the "reference" subfolder under the same path with .csv.
 wwb --base-model SimianLuo/LCM_Dreamshaper_v7--gt-data lcm_test/gt.csv --model-type text-to-image --hf
 # Compute the metric
@@ -91,14 +100,14 @@ wwb --target-model sd-lcm-int8 --gt-data lcm_test/gt.csv --model-type text-to-im
 ### Compare Text-to-image models with LoRA
 ```sh
 # Export FP16 model to OpenVINO
-optimum-cli export openvino -m black-forest-labs/FLUX.1-dev FLUX.1-dev-fp
+optimum-cli export openvino -m black-forest-labs/FLUX.1-schnell FLUX.1-schnell-fp
 
 # Collect the references and save the mapping in the .csv file.
 # Reference images will be stored in the "reference" subfolder under the same path with .csv.
-wwb --base-model black-forest-labs/FLUX.1-dev --gt-data flux.1-dev/gt.csv --model-type text-to-image --adapters Octree/flux-schnell-lora Shakker-Labs/FLUX.1-dev-LoRA-add-details --alphas 0.1 0.9 --hf
+wwb --base-model black-forest-labs/FLUX.1-schnell --gt-data flux.1-schnell/gt.csv --model-type text-to-image --adapters Octree/flux-schnell-lora --alphas 0.1 --hf
 # Compute the metric
 # Target images will be stored in the "target" subfolder under the same path with .csv.
-wwb --target-model FLUX.1-dev-fp --gt-data flux.1-dev/gt.csv --model-type text-to-image --adapters flux-schnell-lora.safetensors FLUX-dev-lora-add_details.safetensors --alphas 0.1 0.9 --genai
+wwb --target-model FLUX.1-schnell-fp --gt-data flux.1-schnell/gt.csv --model-type text-to-image --adapters flux-schnell-lora.safetensors --alphas 0.1 --genai
 ```
 
 ### Compare Text Rerank models
@@ -127,16 +136,82 @@ wwb --base-model BAAI/bge-small-en-v1.5 --gt-data embed_test/gt.csv --model-type
 wwb --target-model ./bge-small-en-v1.5 --gt-data embed_test/gt.csv --model-type text-embedding --embeds_pooling mean --embeds_normalize --embeds_padding_side "left" --genai
 ```
 
+### Compare Text-to-video models
+```sh
+# Export model to OpenVINO, you can specify weight format with --weight-format option, for example --weight-format fp32/fp16/int8
+optimum-cli export openvino -m Lightricks/LTX-Video --weight-format fp32 ltx-video-model
+# Collect the references and save the mapping in the .csv file.
+# Reference videos will be stored in the "reference" subfolder under the same path with .csv.
+wwb --base-model Lightricks/LTX-Video --gt-data video_gen_test/gt.csv --model-type text-to-video --hf
+# Compute the metric
+# Target video will be stored in the "target" subfolder under the same path with .csv.
+# you can also specify the parameter: --output [custom folder], then the target videos and the corresponding CSV files with metrics will be saved to that folder.
+# compute metrics with optimum-intel
+wwb --target-model ltx-video-model --gt-data video_gen_test/gt.csv --model-type text-to-video --output ltx_video_optimum
+# compute metrics with GenAI
+wwb --target-model ltx-video-model --gt-data video_gen_test/gt.csv --model-type text-to-video --genai --output ltx_video_genai
+```
+
+### Compare Text-to-video models with LoRA (LTX-Video)
+
+Community LoRA adapters for LTX-Video are available on [HuggingFace](https://huggingface.co/models?other=base_model:adapter:Lightricks/LTX-Video).
+
+```sh
+# Export model to OpenVINO
+optimum-cli export openvino -m Lightricks/LTX-Video --weight-format fp32 ltx-video-model
+# Collect references using HuggingFace diffusers with a LoRA adapter
+wwb --base-model Lightricks/LTX-Video --gt-data ltx_lora_test/gt.csv --model-type text-to-video --adapters path/to/lora.safetensors --alphas 0.9 --hf
+# Compute metrics with OpenVINO GenAI and the same LoRA adapter
+wwb --target-model ltx-video-model --gt-data ltx_lora_test/gt.csv --model-type text-to-video --adapters path/to/lora.safetensors --alphas 0.9 --genai
+# Compare a LoRA-loaded model against a plain baseline (empty adapter override)
+wwb --target-model ltx-video-model --gt-data ltx_lora_test/gt.csv --model-type text-to-video --adapters path/to/lora.safetensors --alphas 0.9 --genai --empty_adapters
+```
+
+### Compare Speech-generation models
+```sh
+# Export SpeechT5 to OpenVINO.
+optimum-cli export openvino --model microsoft/speecht5_tts --model-kwargs "{\"vocoder\": \"microsoft/speecht5_hifigan\"}" speecht5_tts_ov
+
+# Download speaker embeddings (Replace with your own embeddings if needed)
+hf download Xenova/cmu-arctic-xvectors-extracted cmu_us_slt_arctic-wav-arctic_a0508.bin --repo-type dataset --local-dir .
+
+# Collect reference audio with the Hugging Face baseline.
+# Reference wav files will be stored under "reference" subfolder under the same path with .csv.
+wwb --base-model microsoft/speecht5_tts --gt-data speech_gen_test/gt.csv --model-type speech-generation --speaker_embeddings cmu_us_slt_arctic-wav-arctic_a0508.bin --hf
+
+# Compute the metric
+# Target wav files will be stored in the "target" subfolder under the same path with .csv.
+# you can also specify the parameter: --output [custom folder], then the target wav files and the corresponding CSV files with metrics will be saved to that folder.
+# compute metrics with optimum-intel
+wwb --target-model speecht5_tts_ov --gt-data speech_gen_test/gt.csv --model-type speech-generation --output optimum_output --speaker_embeddings cmu_us_slt_arctic-wav-arctic_a0508.bin
+# compute metrics with GenAI
+wwb --target-model speecht5_tts_ov --gt-data speech_gen_test/gt.csv --model-type speech-generation --output genai_output --speaker_embeddings cmu_us_slt_arctic-wav-arctic_a0508.bin --genai
+```
+
+For SpeechT5, `--speaker_embeddings` is optional.
+If omitted for HF/Optimum, WWB will download and use
+`Xenova/cmu-arctic-xvectors-extracted/cmu_us_slt_arctic-wav-arctic_a0508.bin` automatically.
+For GenAI, this is the default speaker embedding that is compiled into the runtime.
+
+The speech-generation evaluator reports these metrics:
+
+* `speaker score` - speaker similarity based on SpeechBrain speaker verification.
+* `content score` - transcript similarity between base model and target model output, based on whisper transcription and normalized text comparison.
+* `acoustic score` - overall sound-character similarity based on spectral features (RMS, log-mel DTW, spectral rolloff)
+* `duration score` - relative utterance length similarity between target and reference.
+* `overall similarity` - aggregate score used for sorting worst examples.
+
 ### API
 The API provides a way to access to investigate the worst generated text examples.
 
 ```python
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 import whowhatbench
 
 model_id = "facebook/opt-1.3b"
 base_small = AutoModelForCausalLM.from_pretrained(model_id)
-optimized_model = AutoModelForCausalLM.from_pretrained(model_id, load_in_4bit=True, device_map="auto")
+quant_config = BitsAndBytesConfig(load_in_4bit=True)
+optimized_model = AutoModelForCausalLM.from_pretrained(model_id, quantization_config=quant_config, device_map="auto")
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 
 evaluator = whowhatbench.TextEvaluator(base_model=base_small, tokenizer=tokenizer)
@@ -197,7 +272,7 @@ wwb --target-model /home/user/models/Llama_2_7b_chat_hf_int8 --gt-data llama_2_7
 wwb --base-model meta-llama/Llama-2-7b-chat-hf --gt-data llama_2_7b_wwb_gt.csv --hf
 
 # Use --language parameter to control the language of prompts
-# Autodetection works for basic Chinese models 
+# Autodetection works for basic Chinese models
 wwb --base-model meta-llama/Llama-2-7b-chat-hf --gt-data llama_2_7b_wwb_gt.csv --hf
 ```
 
@@ -213,3 +288,9 @@ wwb --base-model meta-llama/Llama-2-7b-chat-hf --gt-data llama_2_7b_wwb_gt.csv -
 
 * The generation of ground truth on uncompressed model must be run before comparison with compressed model.
 * WWB uses [sentence-transformers/all-mpnet-base-v2](https://huggingface.co/sentence-transformers/all-mpnet-base-v2) for similarity measurement but you can use other similar network.
+* This project uses a subset of the ChatAlpaca-10k dataset (https://huggingface.co/datasets/flpelerin/ChatAlpaca-10k). \
+The dataset is licensed under Creative Commons Attribution 4.0 (CC BY 4.0).
+* This project uses data from the Puffin dataset (https://huggingface.co/datasets/LDJnr/Puffin). \
+The dataset is licensed under the Apache License 2.0.
+* This project uses questions from the VQA v2 dataset (https://visualqa.org/). \
+Annotations are licensed under CC BY 4.0.

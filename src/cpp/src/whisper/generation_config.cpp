@@ -1,7 +1,5 @@
-// Copyright (C) 2023-2025 Intel Corporation
+// Copyright (C) 2023-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
-
-#include "openvino/genai/whisper_generation_config.hpp"
 
 #include <fstream>
 #include <limits>
@@ -9,6 +7,7 @@
 #include <openvino/runtime/core.hpp>
 
 #include "json_utils.hpp"
+#include "openvino/genai/whisper_generation_config.hpp"
 #include "utils.hpp"
 
 namespace ov {
@@ -42,6 +41,7 @@ WhisperGenerationConfig::WhisperGenerationConfig(const std::filesystem::path& js
     }
 
     read_json_param(data, "lang_to_id", lang_to_id);
+    read_json_param(data, "alignment_heads", alignment_heads);
 
     apply_chat_template = false;
 }
@@ -64,6 +64,8 @@ void WhisperGenerationConfig::update_generation_config(const ov::AnyMap& config_
     read_anymap_param(config_map, "return_timestamps", return_timestamps);
     read_anymap_param(config_map, "initial_prompt", initial_prompt);
     read_anymap_param(config_map, "hotwords", hotwords);
+    read_anymap_param(config_map, "word_timestamps", word_timestamps);
+    read_anymap_param(config_map, "alignment_heads", alignment_heads);
 
     GenerationConfig::update_generation_config(config_map);
 }
@@ -71,9 +73,18 @@ void WhisperGenerationConfig::update_generation_config(const ov::AnyMap& config_
 void WhisperGenerationConfig::validate() const {
     GenerationConfig::validate();
 
+    if (is_multilingual) {
+        OPENVINO_ASSERT(!lang_to_id.empty(),
+                        "'lang_to_id' map must be provided for multilingual models.\n"
+                        "'lang_to_id' map can be provided as custom std::map<std::string, int64_t>\n"
+                        "Or initialized from generation_config.json: \n"
+                        "ov::genai::WhisperGenerationConfig config = pipeline.get_generation_config();\n"
+                        "ov::genai::WhisperGenerationConfig config{models_path / \"generation_config.json\"};");
+    }
+
     if (is_multilingual && language.has_value()) {
         OPENVINO_ASSERT(lang_to_id.count(*language),
-                        "'language' " + *language + " must be provided in generation_config.json 'lang_to_id' map.");
+                        "'language' " + *language + " must be provided in 'lang_to_id' map.");
     }
 
     if (is_multilingual && task.has_value()) {
@@ -94,6 +105,9 @@ void WhisperGenerationConfig::validate() const {
                     ".");
 
     OPENVINO_ASSERT(!is_assisting_generation(), "Assisted generation is not supported.");
+
+    OPENVINO_ASSERT(!word_timestamps || !alignment_heads.empty(),
+                    "'word_timestamps' can be true only when 'alignment_heads' is set and not empty.");
 }
 }  // namespace genai
 }  // namespace ov

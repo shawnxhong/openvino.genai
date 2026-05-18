@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
 if(ENABLE_SAMPLES)
@@ -21,6 +21,9 @@ install(FILES
     DESTINATION samples
     COMPONENT cpp_samples_genai)
 
+install(FILES cpp/fetch_opencv.cmake
+    DESTINATION samples/cpp COMPONENT cpp_samples_genai)
+
 install(DIRECTORY
             cpp/text_generation
             cpp/image_generation
@@ -42,6 +45,7 @@ install(DIRECTORY
         USE_SOURCE_PERMISSIONS)
 
 install(DIRECTORY
+        c/common
         c/text_generation
         c/whisper_speech_recognition
         c/visual_language_chat

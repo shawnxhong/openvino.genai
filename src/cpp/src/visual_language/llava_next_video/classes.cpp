@@ -1,4 +1,4 @@
-// Copyright (C) 2023-2025 Intel Corporation
+// Copyright (C) 2023-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 
 #include "visual_language/llava_next_video/classes.hpp"
@@ -42,7 +42,7 @@ std::shared_ptr<ov::Node> create_mean_scale(std::shared_ptr<ov::Node> input_u8_o
     if (input_u8_or_f32->get_element_type() == ov::element::u8) {
         input_f32 = std::make_shared<v0::Convert>(input_u8_or_f32, ov::element::f32);
     } else {
-        input_f32 = input_u8_or_f32;
+        input_f32 = std::move(input_u8_or_f32);
     }
 
     // Follow the original mean_scale() function logic exactly, in tensor form:
@@ -325,7 +325,7 @@ EncodedImage VisionEncoderLLaVANextVideo::encode(const ov::Tensor& image, const 
     ov::InferRequest& encoder = infer_request_guard.get();
     CircularBufferQueueElementGuard<ov::InferRequest> infer_request_guard_mm_projector(this->m_ireq_queue_multi_modal_projector.get());
     ov::InferRequest& mm_projector = infer_request_guard_mm_projector.get();
-    ProcessorConfig config = utils::from_any_map(config_map, m_processor_config);
+    ProcessorConfig config = ProcessorConfig::from_any_map(config_map, m_processor_config);
 
     ov::Shape pixel_values_shape;
     if (use_ov_vision_preprocess) {
@@ -409,7 +409,7 @@ EncodedImage VisionEncoderLLaVANextVideo::encode(const ov::Tensor& image, const 
 
 NormalizedPrompt InputsEmbedderLLaVANextVideo::normalize_prompt(const std::string& prompt, size_t base_id, const std::vector<EncodedImage>& images) const {
     std::string image_token = m_vlm_config.im_start;
-    auto [unified_prompt, images_sequence] = normalize(prompt, image_token, image_token, base_id, images.size());
+    auto [unified_prompt, images_sequence] = normalize(prompt, image_token, image_token, base_id, images.size(), VisionType::IMAGE);
     size_t searched_pos = 0;
     for (size_t new_image_id : images_sequence) {
         const EncodedImage& encoded_image = images.at(new_image_id - base_id);
@@ -532,13 +532,26 @@ ov::Tensor VisionEncoderLLaVANextVideo::preprocess_frames_cpp(const std::vector<
     return concatenated_frames;
 }
 
-std::vector<ov::genai::EncodedVideo> InputsEmbedderLLaVANextVideo::encode_videos(const std::vector<ov::Tensor>& videos) {
+std::vector<ov::genai::EncodedVideo> InputsEmbedderLLaVANextVideo::encode_videos(
+    const std::vector<ov::Tensor>& videos,
+    const std::vector<VideoMetadata>& videos_metadata
+) {
+    OPENVINO_ASSERT(videos.size() == videos_metadata.size() || videos_metadata.empty(),
+        "Number of videos and videos metadata must match if metadata provided.");
+
     auto vision_encoder = std::static_pointer_cast<VisionEncoderLLaVANextVideo>(m_vision_encoder);
     auto config = vision_encoder->get_processor_config();
 
     std::vector<ov::genai::EncodedVideo> encoded_videos;
-    for (const auto video: videos) {
-        std::vector<ov::Tensor> frames = to_single_image_tensors({video});
+    encoded_videos.reserve(videos.size());
+
+    VideoMetadata default_metadata{};
+
+    for (size_t i = 0; i < videos.size(); ++i) {
+        const VideoMetadata& video_metadata = i < videos_metadata.size() ? videos_metadata[i] : default_metadata;
+        const auto sampled_video = sample_video_if_needed(videos[i], video_metadata);
+        std::vector<ov::Tensor> frames = to_single_image_tensors({sampled_video});
+
         size_t num_frames = frames.size();
 
         // Calculate num_video_tokens (same for both OV and CPU preprocessing)
@@ -556,7 +569,7 @@ std::vector<ov::genai::EncodedVideo> InputsEmbedderLLaVANextVideo::encode_videos
             size_t orig_width = frame_shape[2];
 
             // Set inputs for integrated model
-            set_preprocess_parameters(encoder, video, {orig_height, orig_width}, config);
+            set_preprocess_parameters(encoder, sampled_video, {orig_height, orig_width}, config);
         } else {
             // Use CPU preprocessing - preprocess and concatenate frames
             ov::Tensor concatenated_frames = vision_encoder->preprocess_frames_cpp(frames);
@@ -585,6 +598,7 @@ std::vector<ov::genai::EncodedVideo> InputsEmbedderLLaVANextVideo::encode_videos
         video_features.set_shape(new_shape);
         encoded_video.video_features = std::move(video_features);
         encoded_video.num_video_tokens = num_video_tokens;
+        encoded_video.metadata = video_metadata;
         encoded_videos.push_back(encoded_video);
     }
     return encoded_videos;
@@ -594,12 +608,10 @@ NormalizedPrompt InputsEmbedderLLaVANextVideo::normalize_prompt(const std::strin
     size_t base_image_id,
     size_t base_video_id,
     const std::vector<EncodedImage>& images,
-    const std::vector<EncodedVideo>& videos) const {
-    if (!videos.size()) {
-        return normalize_prompt(prompt, base_image_id, images);
-    }
+    const std::vector<EncodedVideo>& videos) const
+{
     std::string video_token = m_vlm_config.video_start;
-    auto [unified_prompt, video_sequence] = normalize(prompt, video_token, video_token, base_video_id, videos.size());
+    auto [unified_prompt, video_sequence] = normalize(prompt, video_token, video_token, base_video_id, videos.size(), VisionType::VIDEO);
     size_t searched_pos = 0;
     for (size_t new_image_id : video_sequence) {
         const EncodedVideo& encoded_video = videos.at(new_image_id - base_video_id);
@@ -616,11 +628,9 @@ NormalizedPrompt InputsEmbedderLLaVANextVideo::normalize_prompt(const std::strin
     }
     std::vector<size_t> images_sequence;
     // normalize images after videos to make sure image tokens appended at the start of prompt before video tokens
-    if (images.size()) {
-        auto normalize_res = normalize_prompt(unified_prompt, base_image_id, images);
-        unified_prompt = normalize_res.unified_prompt;
-        images_sequence = normalize_res.images_sequence;
-    }
+    auto normalize_res = normalize_prompt(unified_prompt, base_image_id, images);
+    unified_prompt = normalize_res.unified_prompt;
+    images_sequence = normalize_res.images_sequence;
     return {std::move(unified_prompt), std::move(images_sequence), std::move(video_sequence)};
 }
 

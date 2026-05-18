@@ -1,4 +1,4 @@
-# Copyright (C) 2025 Intel Corporation
+# Copyright (C) 2025-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
@@ -24,6 +24,4 @@ def test_structured_output_sample(convert_model):
     js_result = run_sample(js_command)
     js_predictions = js_result.stdout
 
-    # Compare results
     assert py_predictions == js_predictions, "Python and JS results should match"
-

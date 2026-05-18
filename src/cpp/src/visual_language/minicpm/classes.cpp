@@ -1,5 +1,5 @@
 
-// Copyright (C) 2023-2025 Intel Corporation
+// Copyright (C) 2023-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 
 #include "visual_language/minicpm/classes.hpp"
@@ -423,7 +423,7 @@ std::pair<EncodedImage, ImageSliceResult> llava_image_embed_make_with_bytes_slic
 EncodedImage VisionEncoderMiniCPM::encode(const ov::Tensor& image, const ov::AnyMap& config_map) {
     CircularBufferQueueElementGuard<ov::InferRequest> infer_request_guard(this->m_ireq_queue_vision_encoder.get());
     ov::InferRequest& encoder = infer_request_guard.get();
-    ProcessorConfig config = utils::from_any_map(config_map, m_processor_config);
+    ProcessorConfig config = ProcessorConfig::from_any_map(config_map, m_processor_config);
 
     clip_ctx ctx_clip;
     ctx_clip.image_size = config.image_size;

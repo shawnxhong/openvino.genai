@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2023-2025 Intel Corporation
+# Copyright (C) 2023-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 import os
 import time
@@ -13,7 +13,8 @@ import llm_bench_utils
 import llm_bench_utils.model_utils as model_utils
 import llm_bench_utils.metrics_print as metrics_print
 import llm_bench_utils.gen_output_data as gen_output_data
-import llm_bench_utils.parse_json_data as parse_json_data
+from llm_bench_utils.prompt_utils import get_image_prompt
+from .pipeline_utils import collect_prompts_step
 from transformers.image_utils import load_image
 import openvino as ov
 import numpy as np
@@ -88,13 +89,7 @@ def run_image_generation(image_param, num, image_id, pipe, args, iter_data_list,
     log.info(f"[{'warm-up' if num == 0 else num}][P{image_id}]{out_str}")
 
     result_md5_list = []
-    max_rss_mem_consumption = ''
-    max_sys_mem_consumption = ''
-    max_rss_mem_increase = ''
-    max_sys_mem_increase = ''
-    if (args['mem_consumption'] == 1 and num == 0) or args['mem_consumption'] == 2:
-        mem_consumption.start()
-
+    mem_consumption.start(num)
     input_text_list = [input_text] * args['batch_size']
     input_data = pipe.tokenizer(input_text, return_tensors='pt')
     input_data.pop('token_type_ids', None)
@@ -107,24 +102,19 @@ def run_image_generation(image_param, num, image_id, pipe, args, iter_data_list,
     start = time.perf_counter()
     res = pipe(input_text_list, **input_args, num_images_per_prompt=args['batch_size']).images
     end = time.perf_counter()
-    if (args['mem_consumption'] == 1 and num == 0) or args['mem_consumption'] == 2:
-        mem_consumption.stop_and_collect_data(f"{'P' + str(num) if num > 0 else 'warm-up'}_{proc_id}")
-        max_rss_mem_consumption, max_rss_mem_increase, max_sys_mem_consumption, max_sys_mem_increase = mem_consumption.get_data()
+    generation_time = end - start
+    memory_metrics = mem_consumption.iter_stop_and_collect_data(num)
     for bs_idx in range(args['batch_size']):
         rslt_img_fn = llm_bench_utils.output_file.output_gen_image(res[bs_idx], args, image_id, num, bs_idx, proc_id, '.png')
         result_md5_list.append(hashlib.md5(Image.open(rslt_img_fn).tobytes(), usedforsecurity=False).hexdigest())
-    generation_time = end - start
     iter_data = gen_output_data.gen_iterate_data(
         iter_idx=num,
         in_size=input_token_size * args['batch_size'],
         infer_count=input_args["num_inference_steps"],
         gen_time=generation_time,
         res_md5=result_md5_list,
-        max_rss_mem=max_rss_mem_consumption,
-        max_rss_mem_increase=max_rss_mem_increase,
-        max_sys_mem=max_sys_mem_consumption,
-        max_sys_mem_increase=max_sys_mem_increase,
         prompt_idx=image_id,
+        **memory_metrics,
     )
     iter_data_list.append(iter_data)
     metrics_print.print_metrics(
@@ -156,13 +146,7 @@ def run_image_generation_genai(image_param, num, image_id, pipe, args, iter_data
             log.warning(f"image generation pipeline was reshaped with guidance_scale={reshaped_gs}, but is being passed into generate() as {new_gs}")
 
     result_md5_list = []
-    max_rss_mem_consumption = ''
-    max_sys_mem_consumption = ''
-    max_rss_mem_increase = ''
-    max_sys_mem_increase = ''
-    if (args['mem_consumption'] == 1 and num == 0) or args['mem_consumption'] == 2:
-        mem_consumption.start()
-
+    mem_consumption.start(num)
     input_text_list = [input_text] * args['batch_size']
     if num == 0 and args["output_dir"] is not None:
         for bs_idx, in_text in enumerate(input_text_list):
@@ -184,9 +168,7 @@ def run_image_generation_genai(image_param, num, image_id, pipe, args, iter_data
     elif "callback" in input_args:
         performance_metrics = callback
 
-    if (args['mem_consumption'] == 1 and num == 0) or args['mem_consumption'] == 2:
-        mem_consumption.stop_and_collect_data(f"{'P' + str(num) if num > 0 else 'warm-up'}_{proc_id}")
-        max_rss_mem_consumption, max_rss_mem_increase, max_sys_mem_consumption, max_sys_mem_increase = mem_consumption.get_data()
+    memory_metrics = mem_consumption.iter_stop_and_collect_data(num)
     for bs_idx in range(args['batch_size']):
         image = Image.fromarray(res[bs_idx])
         rslt_img_fn = llm_bench_utils.output_file.output_gen_image(image, args, image_id, num, bs_idx, proc_id, '.png')
@@ -198,11 +180,8 @@ def run_image_generation_genai(image_param, num, image_id, pipe, args, iter_data
         infer_count=input_args["num_inference_steps"],
         gen_time=generation_time,
         res_md5=result_md5_list,
-        max_rss_mem=max_rss_mem_consumption,
-        max_rss_mem_increase=max_rss_mem_increase,
-        max_sys_mem=max_sys_mem_consumption,
-        max_sys_mem_increase=max_sys_mem_increase,
         prompt_idx=image_id,
+        **memory_metrics,
     )
     iter_data_list.append(iter_data)
     metrics_print.print_metrics(
@@ -217,19 +196,7 @@ def run_image_generation_genai(image_param, num, image_id, pipe, args, iter_data
 
 
 def run_image_generation_benchmark(model_path, framework, device, args, num_iters, mem_consumption):
-    input_image_list = get_image_prompt(args)
-    if args['prompt_index'] is None:
-        prompt_idx_list = [image_id for image_id, input_text in enumerate(input_image_list)]
-        image_list = input_image_list
-    else:
-        prompt_idx_list = []
-        image_list = []
-        for i in args['prompt_index']:
-            if 0 <= i < len(input_image_list):
-                image_list.append(input_image_list[i])
-                prompt_idx_list.append(i)
-    if len(image_list) == 0:
-        raise RuntimeError('==Failure prompts is empty ==')
+    image_list, prompt_idx_list = collect_prompts_step(args, get_image_prompt)
 
     # If --static_reshape is specified, we need to get width, height, and guidance scale to drop into args
     # as genai's create_image_gen_model implementation will need those to reshape the pipeline before compile().
@@ -241,12 +208,13 @@ def run_image_generation_benchmark(model_path, framework, device, args, num_iter
         if "guidance_scale" in static_input_args:
             args["guidance_scale"] = static_input_args["guidance_scale"]
 
+    mem_consumption.update_marker("model")
     pipe, pretrain_time, use_genai, callback = FW_UTILS[framework].create_image_gen_model(model_path, device, mem_consumption, **args)
     iter_data_list = []
 
     if framework == "ov" and not use_genai:
         stable_diffusion_hook.new_text_encoder(pipe)
-        stable_diffusion_hook.new_unet(pipe)
+        stable_diffusion_hook.new_main_model(pipe)
         stable_diffusion_hook.new_vae_decoder(pipe)
 
     log.info(f'Benchmarking iter nums(exclude warm-up): {num_iters}, prompt nums: {len(image_list)}, prompt idx: {prompt_idx_list}')
@@ -258,11 +226,13 @@ def run_image_generation_benchmark(model_path, framework, device, args, num_iter
 
     # if num_iters == 0, just output warm-up data
     proc_id = os.getpid()
+    mem_consumption.activate_cooldown("after model compilation")
     iter_timestamp = model_utils.init_timestamp(num_iters, image_list, prompt_idx_list)
     if args['subsequent'] is False:
         for num in range(num_iters + 1):
             for image_id, image_param in enumerate(image_list):
                 p_idx = prompt_idx_list[image_id]
+                mem_consumption.update_marker(f"step-{num}-{p_idx}")
                 iter_timestamp[num][p_idx]['start'] = datetime.datetime.now().isoformat()
                 image_gen_fn(image_param, num, prompt_idx_list[image_id], pipe, args, iter_data_list, proc_id, mem_consumption, callback)
                 iter_timestamp[num][p_idx]['end'] = datetime.datetime.now().isoformat()
@@ -272,6 +242,7 @@ def run_image_generation_benchmark(model_path, framework, device, args, num_iter
         for image_id, image_param in enumerate(image_list):
             p_idx = prompt_idx_list[image_id]
             for num in range(num_iters + 1):
+                mem_consumption.update_marker(f"step-{num}-{image_id}")
                 iter_timestamp[num][p_idx]['start'] = datetime.datetime.now().isoformat()
                 image_gen_fn(image_param, num, p_idx, pipe, args, iter_data_list, proc_id, mem_consumption)
                 iter_timestamp[num][p_idx]['end'] = datetime.datetime.now().isoformat()
@@ -280,26 +251,3 @@ def run_image_generation_benchmark(model_path, framework, device, args, num_iter
 
     metrics_print.print_average(iter_data_list, prompt_idx_list, args['batch_size'], False)
     return iter_data_list, pretrain_time, iter_timestamp
-
-
-def get_image_prompt(args):
-    input_image_list = []
-
-    input_key = ['prompt']
-    if args.get("task") == args["use_case"].TASK["inpainting"]["name"] or ((args.get("media") or args.get("images")) and args.get("mask_image")):
-        input_key = ['media', "mask_image", "prompt"]
-    elif args.get("task") == args["use_case"].TASK["img2img"]["name"] or args.get("media") or args.get("images"):
-        input_key = ['media', "prompt"]
-
-    output_data_list, is_json_data = model_utils.get_param_from_file(args, input_key)
-    if is_json_data is True:
-        image_param_list = parse_json_data.parse_image_json_data(output_data_list)
-        if len(image_param_list) > 0:
-            for image_data in image_param_list:
-                if args['prompt_file'] is not None and len(args['prompt_file']) > 0:
-                    image_data['media'] = model_utils.resolve_media_file_path(image_data.get("media"), args['prompt_file'][0])
-                    image_data['mask_image'] = model_utils.resolve_media_file_path(image_data.get("mask_image"), args['prompt_file'][0])
-                input_image_list.append(image_data)
-    else:
-        input_image_list.append(output_data_list[0])
-    return input_image_list

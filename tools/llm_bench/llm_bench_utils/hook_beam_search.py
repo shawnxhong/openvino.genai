@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2023-2025 Intel Corporation
+# Copyright (C) 2023-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 # flake8: noqa
 import time
@@ -11,19 +11,38 @@ import transformers
 tm_list = []
 tm_infer_list = []
 tm_mm_embeddings = []
+new_prefill = None
 
-if version.parse(transformers.__version__) >= version.parse("4.55.0"):
-    import llm_bench_utils.llm_hook_beam_search.hook_beam_search_v55 as hook_beam_search_v55
-    new_beam_search = hook_beam_search_v55.new_beam_search_v55
+if version.parse(transformers.__version__) >= version.parse("5.3.0"):
+    import llm_bench_utils.llm_hook_beam_search.hook_beam_search_v5_3 as hook_beam_search_v5_3
+
+    new_beam_search = hook_beam_search_v5_3.new_beam_search
+    new_prefill = hook_beam_search_v5_3.new_prefill
+elif version.parse(transformers.__version__) >= version.parse("5.0"):
+    import llm_bench_utils.llm_hook_beam_search.hook_beam_search_v5 as hook_beam_search_v5
+
+    new_beam_search = hook_beam_search_v5.new_beam_search
+    new_prefill = hook_beam_search_v5.new_prefill
+elif version.parse(transformers.__version__) >= version.parse("4.57.0"):
+    import llm_bench_utils.llm_hook_beam_search.hook_beam_search_v4_57 as hook_beam_search_v4_57
+
+    new_beam_search = hook_beam_search_v4_57.new_beam_search_v57
+elif version.parse(transformers.__version__) >= version.parse("4.55.0"):
+    import llm_bench_utils.llm_hook_beam_search.hook_beam_search_v4_55 as hook_beam_search_v4_55
+
+    new_beam_search = hook_beam_search_v4_55.new_beam_search_v55
 elif version.parse(transformers.__version__) >= version.parse("4.52.0"):
-    import llm_bench_utils.llm_hook_beam_search.hook_beam_search_v52 as hook_beam_search_v52
-    new_beam_search = hook_beam_search_v52.new_beam_search_v52
+    import llm_bench_utils.llm_hook_beam_search.hook_beam_search_v4_52 as hook_beam_search_v4_52
+
+    new_beam_search = hook_beam_search_v4_52.new_beam_search_v52
 elif version.parse(transformers.__version__) >= version.parse("4.51.0"):
-    import llm_bench_utils.llm_hook_beam_search.hook_beam_search_v51 as hook_beam_search_v51
-    new_beam_search = hook_beam_search_v51.new_beam_search_v51
+    import llm_bench_utils.llm_hook_beam_search.hook_beam_search_v4_51 as hook_beam_search_v4_51
+
+    new_beam_search = hook_beam_search_v4_51.new_beam_search_v51
 else:
-    import llm_bench_utils.llm_hook_beam_search.hook_beam_search_v40 as hook_beam_search_v40
-    new_beam_search = hook_beam_search_v40.new_beam_search_v40
+    import llm_bench_utils.llm_hook_beam_search.hook_beam_search_v4_40 as hook_beam_search_v4_40
+
+    new_beam_search = hook_beam_search_v4_40.new_beam_search_v40
 
 def new_get_multimodal_embeddings(
         self, input_ids, pixel_values=None, attention_mask=None, position_ids=None, **kwargs
@@ -73,7 +92,12 @@ class BeamSearchHook:
 
     def new_forward(self, model):
         """Define a new beam search function."""
-        model._beam_search = new_beam_search.__get__(model, model.__class__)
+        if version.parse(transformers.__version__) >= version.parse("4.57.0"):
+            type(model)._beam_search = new_beam_search
+            if new_prefill:
+                type(model)._prefill = new_prefill
+        else:
+            model._beam_search = new_beam_search.__get__(model, model.__class__)
 
     def new_get_multimodal_embeddings(self, model):
         model._orig_get_multimodal_embeddings = model.get_multimodal_embeddings

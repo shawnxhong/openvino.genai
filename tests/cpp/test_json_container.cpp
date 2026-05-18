@@ -1,4 +1,4 @@
-// Copyright (C) 2025 Intel Corporation
+// Copyright (C) 2025-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 
 #include <gtest/gtest.h>
@@ -124,6 +124,15 @@ TEST(JsonContainerTest, copy) {
     EXPECT_EQ(original["nested"]["key"].get_string(), "value");
     EXPECT_FALSE(original.contains("new_section"));
     EXPECT_NE(copied, original);
+
+    // Copy method on sub-object
+    JsonContainer original_nested = original["nested"];
+    JsonContainer copied_nested = original_nested.copy();
+    EXPECT_EQ(copied_nested, original_nested);
+    copied_nested["key"] = "changed";
+    EXPECT_NE(copied_nested, original_nested);
+    EXPECT_EQ(original_nested["key"].get_string(), "value");
+    EXPECT_EQ(copied_nested["key"].get_string(), "changed");
 }
 
 TEST(JsonContainerTest, share) {

@@ -1,4 +1,4 @@
-// Copyright (C) 2023-2025 Intel Corporation
+// Copyright (C) 2023-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 
 #pragma once
@@ -10,6 +10,7 @@
 
 #include "openvino/core/any.hpp"
 #include "openvino/genai/generation_config.hpp"
+#include "openvino/genai/generation_handle.hpp"
 #include "openvino/genai/tokenizer.hpp"
 #include "openvino/genai/streamer_base.hpp"
 #include "openvino/genai/perf_metrics.hpp"
@@ -22,8 +23,7 @@ namespace genai {
 
 // Return flag corresponds whether generation should be stopped. It could be:
 // ov::genai::StreamingStatus flag, RUNNING means continue generation, STOP means stop generation, CANCEL means stop generation and remove last prompt and answer from history
-// *DEPRECATED* bool flag, false means continue generation, true means stop. Please, use `ov::genai::StreamingStatus` instead.
-using StreamerVariant = std::variant<std::function<bool(std::string)>, std::function<StreamingStatus(std::string)>, std::shared_ptr<StreamerBase>, std::monostate>;
+using StreamerVariant = std::variant<std::function<StreamingStatus(std::string)>, std::shared_ptr<StreamerBase>, std::monostate>;
 using OptionalGenerationConfig = std::optional<GenerationConfig>;
 using EncodedInputs = std::variant<ov::Tensor, TokenizedInputs>;
 using StringInputs = std::variant<std::string, std::vector<std::string>>;
@@ -37,6 +37,7 @@ using StringInputs = std::variant<std::string, std::vector<std::string>>;
 *
 * @param tokens sequence of resulting tokens
 * @param scores sum of logarithmic probabilities of all tokens in the sequence
+* @param finish_reasons reason why generation is finished for each sequence
 * @param perf_metrics performance metrics with tpot, ttft, etc. of type ov::genai::PerfMetrics
 * @param extended_perf_metrics pipeline specific performance metrics etc. of type ov::genai::PerfMetrics.
 *        Applicable for pipelines with implemented extended metrics: SpeculativeDecoding Pipeline.
@@ -47,6 +48,7 @@ class EncodedResults {
 public:
     std::vector<std::vector<int64_t>> tokens;
     std::vector<float> scores;
+    std::vector<GenerationFinishReason> finish_reasons;
     PerfMetrics perf_metrics;
     std::shared_ptr<ExtendedPerfMetrics> extended_perf_metrics;
 };
@@ -57,6 +59,7 @@ public:
 *
 * @param texts vector of resulting sequences
 * @param scores scores for each sequence
+* @param finish_reasons vector of finish reasons for each sequence
 * @param perf_metrics performance metrics with tpot, ttft, etc. of type ov::genai::PerfMetrics
 * @param extended_perf_metrics pipeline specific performance metrics etc. of type ov::genai::PerfMetrics
 *        Applicable for pipelines with implemented extended metrics: SpeculativeDecoding Pipeline.
@@ -67,6 +70,7 @@ class DecodedResults {
 public:
     std::vector<std::string> texts;
     std::vector<float> scores;
+    std::vector<GenerationFinishReason> finish_reasons;
     PerfMetrics perf_metrics;
     std::shared_ptr<ExtendedPerfMetrics> extended_perf_metrics;
     std::vector<JsonContainer> parsed;
@@ -331,12 +335,18 @@ public:
     *
     * @param system_message optional system message.
     */
+    OPENVINO_DEPRECATED(
+        "start_chat() / finish_chat() API is deprecated and will be removed in the next major release. "
+        "Please, use generate() with ChatHistory argument.")
     void start_chat(const std::string& system_message = {});
 
     /**
     * @brief finish chat and clear kv cache.
     * Turns off keeping KV cache between generate calls.
     */
+    OPENVINO_DEPRECATED(
+        "start_chat() / finish_chat() API is deprecated and will be removed in the next major release. "
+        "Please, use generate() with ChatHistory argument.")
     void finish_chat();
 
 private:

@@ -1,4 +1,4 @@
-# Copyright (C) 2024 Intel Corporation
+# Copyright (C) 2024-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 """openvino genai module namespace, exposing pipelines and configs to create these pipelines."""
@@ -19,11 +19,12 @@ from .py_openvino_genai import (
     get_version,
     StreamingStatus,
     TextStreamer,
-    TextParserStreamer
+    TextParserStreamer,
 )
 
 from .py_openvino_genai import (
     Parser,
+    VLLMParserWrapper,
     ReasoningParser,
     DeepSeekR1ReasoningParser,
     Phi4ReasoningParser,
@@ -41,6 +42,7 @@ __version__ = get_version()
 
 from .py_openvino_genai import (
     VLMPipeline,
+    VideoMetadata,
 )
 
 # LLM pipeline
@@ -50,10 +52,7 @@ from .py_openvino_genai import (
 )
 
 # LoRA
-from .py_openvino_genai import (
-    Adapter,
-    AdapterConfig
-)
+from .py_openvino_genai import Adapter, AdapterConfig
 
 # Generation config
 from .py_openvino_genai import (
@@ -61,27 +60,22 @@ from .py_openvino_genai import (
     StructuralTagItem,
     StructuralTagsConfig,
     StructuredOutputConfig,
-    StopCriteria
+    StopCriteria,
 )
 
 # Chat history
-from .py_openvino_genai import (
-    ChatHistory
-)
+from .py_openvino_genai import ChatHistory
 
 # Tokenizers
-from .py_openvino_genai import (
-    TokenizedInputs,
-    Tokenizer
-)
+from .py_openvino_genai import TokenizedInputs, Tokenizer
 
 # Whisper
 from .py_openvino_genai import (
     WhisperGenerationConfig,
     WhisperPipeline,
-    ChunkStreamerBase,
     WhisperRawPerfMetrics,
-    WhisperPerfMetrics
+    WhisperPerfMetrics,
+    WhisperWordTiming,
 )
 
 # Image generation
@@ -103,6 +97,17 @@ from .py_openvino_genai import (
     TorchGenerator,
     ImageGenerationPerfMetrics,
     RawImageGenerationPerfMetrics,
+    TaylorSeerCacheConfig,
+)
+
+# Video generation
+from .py_openvino_genai import (
+    LTXVideoTransformer3DModel,
+    AutoencoderKLLTXVideo,
+    Text2VideoPipeline,
+    VideoGenerationConfig,
+    VideoGenerationResult,
+    VideoGenerationPerfMetrics,
 )
 
 # Continuous batching
@@ -117,19 +122,16 @@ from .py_openvino_genai import (
     SparseAttentionMode,
     SparseAttentionConfig,
     KVCrushAnchorPointMode,
-    KVCrushConfig
+    KVCrushConfig,
 )
 
 # RAG
-from .py_openvino_genai import (
-    TextEmbeddingPipeline,
-    TextRerankPipeline
-)
+from .py_openvino_genai import TextEmbeddingPipeline, TextRerankPipeline
 
 # Speech generation
 from .py_openvino_genai import (
     SpeechGenerationConfig,
     SpeechGenerationPerfMetrics,
     Text2SpeechDecodedResults,
-    Text2SpeechPipeline
+    Text2SpeechPipeline,
 )

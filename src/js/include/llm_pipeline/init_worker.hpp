@@ -1,6 +1,12 @@
+// Copyright (C) 2025-2026 Intel Corporation
+// SPDX-License-Identifier: Apache-2.0
+
 #pragma once
 
+#include <atomic>
+#include <filesystem>
 #include <napi.h>
+
 #include "openvino/genai/llm_pipeline.hpp"
 
 using namespace Napi;
@@ -9,17 +15,20 @@ class InitWorker : public AsyncWorker {
 public:
     InitWorker(Function& callback,
                std::shared_ptr<ov::genai::LLMPipeline>& pipe,
-               const std::string model_path,
+               std::shared_ptr<std::atomic<bool>> is_initializing,
+               std::filesystem::path model_path,
                std::string device,
                ov::AnyMap properties);
     virtual ~InitWorker() {}
 
     void Execute() override;
     void OnOK() override;
+    void OnError(const Error& e) override;
 
 private:
     std::shared_ptr<ov::genai::LLMPipeline>& pipe;
-    std::string model_path;
+    std::shared_ptr<std::atomic<bool>> is_initializing;
+    std::filesystem::path model_path;
     std::string device;
     ov::AnyMap properties;
 };

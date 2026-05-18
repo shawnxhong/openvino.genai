@@ -1,3 +1,6 @@
+# Copyright (C) 2023-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 
 import pandas as pd
@@ -8,22 +11,15 @@ from typing import Literal, Any, Union
 
 from .registry import register_evaluator
 from .text_evaluator import TextEvaluator
-from .utils import get_ignore_parameters_flag, prepare_default_data_image, prepare_default_data_video
+from .utils import (
+    get_ignore_parameters_flag,
+    prepare_default_data_image,
+    prepare_default_data_video,
+    fix_phi3_v_eos_token_id,
+)
+from .inputs_preprocessors import MODEL_TYPE_TO_CLS_MAPPING
 
 DEF_VIDEO_FRAMES_AMOUNT = 10
-
-
-def fix_phi3_v_eos_token_id(model_type, tokenizer):
-    """
-    phi3_v configs aren't consistent. Override the default
-    eos_token_id with the one from a tokenizer similar to
-    an example in
-    https://huggingface.co/microsoft/Phi-3.5-vision-instruct
-    """
-    if 'phi3_v' == model_type:
-        return {"eos_token_id": tokenizer.eos_token_id}
-    else:
-        return dict()
 
 
 @register_evaluator("visual-text", "visual-video-text")
@@ -42,12 +38,16 @@ class VisualTextEvaluator(TextEvaluator):
         gen_answer_fn=None,
         generation_config=None,
         seqs_per_request=None,
+        pruning_ratio=None,
+        relevance_weight=None,
         task_type: Literal['visual-text', 'visual-video-text'] = "visual-text",
         frames_num: int | None = None,
     ) -> None:
         self.processor = processor
         self.is_image_input = (task_type == "visual-text")
         self.frames_num = frames_num or DEF_VIDEO_FRAMES_AMOUNT
+        self.pruning_ratio = pruning_ratio
+        self.relevance_weight = relevance_weight
         super().__init__(
             base_model=base_model,
             tokenizer=tokenizer,
@@ -110,15 +110,31 @@ class VisualTextEvaluator(TextEvaluator):
 
     def _generate_data(self, model, gen_answer_fn=None, generation_config=None):
         def default_gen_answer(
-            model, prompt, image, video, processor, tokenizer, max_new_tokens, crop_question
+            model,
+            prompt,
+            image,
+            video,
+            processor,
+            tokenizer,
+            max_new_tokens,
+            crop_question,
+            pruning_ratio,
+            relevance_weight,
         ):
+            if model.config.model_type in MODEL_TYPE_TO_CLS_MAPPING and "transformers" in str(type(model)):
+                inputs_processor = MODEL_TYPE_TO_CLS_MAPPING[model.config.model_type]()
+                preprocess_inputs = inputs_processor.preprocess_inputs
+            else:
+                from optimum.intel.openvino.modeling_visual_language import (
+                    MODEL_TYPE_TO_CLS_MAPPING as MODEL_TYPE_TO_CLS_MAPPING_OPT,
+                )
 
-            from optimum.intel.openvino.modeling_visual_language import \
-                MODEL_TYPE_TO_CLS_MAPPING
-            preprocess_inputs = MODEL_TYPE_TO_CLS_MAPPING[
-                model.config.model_type
-            ].preprocess_inputs
+                preprocess_inputs = MODEL_TYPE_TO_CLS_MAPPING_OPT[model.config.model_type].preprocess_inputs
             inputs = preprocess_inputs(prompt, image, processor, tokenizer, config=model.config, video=video)
+            input_ids_len = inputs["input_ids"].shape[-1]
+            # videochat_flash_qwen expects "inputs" instead of "input_ids" and requires "modalities" field to be set
+            if model.config.model_type == "videochat_flash_qwen":
+                inputs["inputs"] = inputs.pop("input_ids")
             tokens = model.generate(
                 **inputs,
                 **fix_phi3_v_eos_token_id(model.config.model_type, tokenizer),
@@ -132,7 +148,7 @@ class VisualTextEvaluator(TextEvaluator):
                 # The output tuple has format (<list of decoded outputs without question/prompt>, <GenerateDecoderOnlyOutput>)
                 return tokens[0][0]
             if crop_question:
-                tokens = tokens[:, inputs["input_ids"].shape[-1] :]
+                tokens = tokens[:, input_ids_len:]
 
             answer = self.tokenizer.batch_decode(tokens, skip_special_tokens=True)[0]
             return answer
@@ -162,7 +178,11 @@ class VisualTextEvaluator(TextEvaluator):
         images = image_data.values
         videos = videos_data.values
 
-        for p, i, v in tqdm(zip_longest(prompts, images, videos), desc="Evaluate pipeline"):
+        for p, i, v in tqdm(
+            zip_longest(prompts, images, videos),
+            total=max(len(prompts), len(images), len(videos)),
+            desc="Evaluate pipeline",
+        ):
             answers.append(
                 gen_answer_fn(
                     model,
@@ -173,6 +193,8 @@ class VisualTextEvaluator(TextEvaluator):
                     self.tokenizer,
                     self.max_new_tokens,
                     self._crop_question,
+                    self.pruning_ratio,
+                    self.relevance_weight,
                 )
             )
 

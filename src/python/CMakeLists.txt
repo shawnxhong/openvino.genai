@@ -1,4 +1,4 @@
-# Copyright (C) 2018-2025 Intel Corporation
+# Copyright (C) 2018-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
 
@@ -12,10 +12,10 @@ if (NOT TARGET pybind11::pybind11)
         URL_HASH SHA256=741633da746b7c738bb71f1854f957b9da660bcd2dce68d71949037f0969d0ca
     )
     FetchContent_GetProperties(pybind11)
-    
+
     # search for FindPython3.cmake instead of legacy modules
     set(PYBIND11_FINDPYTHON ON)
-    
+
     if(NOT pybind11_POPULATED)
         FetchContent_Populate(pybind11)
         add_subdirectory(${pybind11_SOURCE_DIR} ${pybind11_BINARY_DIR})
@@ -173,11 +173,22 @@ if(pybind11_stubgen_AVAILABLE)
             COMMAND "${CMAKE_COMMAND}" -E copy ${generated_files} "${CMAKE_CURRENT_SOURCE_DIR}/openvino_genai/")
     endif()
 
+    set(os_specific_list_separator ":")
+    if(WIN32)
+        set(os_specific_list_separator ";")
+    endif()
+    set(pybind11_stubgen_pythonpath "${CMAKE_BINARY_DIR}")
+    if(openvino_pythonpath)
+        string(APPEND pybind11_stubgen_pythonpath "${os_specific_list_separator}${openvino_pythonpath}")
+    endif()
+    if(DEFINED ENV{PYTHONPATH} AND NOT "$ENV{PYTHONPATH}" STREQUAL "")
+        string(APPEND pybind11_stubgen_pythonpath "${os_specific_list_separator}$ENV{PYTHONPATH}")
+    endif()
     set(output_file pybind11_stub_gen_completed.txt)
     add_custom_command(OUTPUT ${output_file}
         COMMAND "${CMAKE_COMMAND}" -E rm -f "${CMAKE_BINARY_DIR}/openvino_genai/__init__.pyi"
                                             "${CMAKE_BINARY_DIR}/openvino_genai/py_openvino_genai.pyi"
-        COMMAND "${CMAKE_COMMAND}" -E env PYTHONPATH=${CMAKE_BINARY_DIR}:${openvino_pythonpath}:$ENV{PYTHONPATH}
+        COMMAND "${CMAKE_COMMAND}" -E env "PYTHONPATH=${pybind11_stubgen_pythonpath}"
                 ${pybind11_stubgen} --output-dir ${stub_files_location} openvino_genai
         COMMAND "${CMAKE_COMMAND}"
                 -D init_pyi_file=${init_pyi_file}
